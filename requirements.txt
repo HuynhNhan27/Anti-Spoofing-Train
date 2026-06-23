@@ -5,6 +5,7 @@ torchvision>=0.15.0
 # Computer Vision & Data Manipulation
 opencv-python>=4.7.0
 numpy>=1.22.0
+pandas>=1.5.0
 albumentations>=1.3.0
 timm>=0.9.0
 
