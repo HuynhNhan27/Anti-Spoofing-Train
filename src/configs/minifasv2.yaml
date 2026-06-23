@@ -1,0 +1,26 @@
+# Data settings
+data:
+  data_dir: "./data/celeba-spoof-cropped-sampled/dataset" # Root dataset folder
+  input_size: 128
+  use_fourier: true            # MiniFASNetV2 uses Fourier maps auxiliary loss
+
+# Model settings
+model:
+  name: "minifasv2"
+  num_classes: 2
+  embedding_size: 128
+  pretrained: false
+
+# Training settings
+train:
+  epochs: 50
+  batch_size: 256
+  lr: 0.1
+  momentum: 0.9
+  weight_decay: 0.0005
+  milestones: [10, 15, 22, 30]
+  gamma: 0.1
+  device: "cuda"
+  save_dir: "models"
+  log_dir: "runs"
+  log_interval: 10

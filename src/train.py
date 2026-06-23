@@ -14,7 +14,7 @@ from src.data.dataset import get_dataloader
 
 def parse_args():
     parser = argparse.ArgumentParser(description="Unified Anti-Spoofing Model Training")
-    parser.add_argument("--config", type=str, default="src/configs/config.yaml", help="Path to config YAML")
+    parser.add_argument("--config", type=str, default="src/configs/minifasv2.yaml", help="Path to config YAML")
     parser.add_argument("--epochs", type=int, default=None, help="Override training epochs")
     parser.add_argument("--batch-size", type=int, default=None, help="Override batch size")
     parser.add_argument("--lr", type=float, default=None, help="Override learning rate")
@@ -48,6 +48,14 @@ def get_model(config, device):
     elif model_name == "detnet59":
         from src.models.detnet.BasicModule import MydetNet59
         model = MydetNet59(pretrained=pretrained)
+    elif model_name == "featherneta":
+        from src.models.feathernet.FeatherNet import FeatherNetA
+        input_size = config["data"]["input_size"]
+        model = FeatherNetA(n_class=num_classes, input_size=input_size)
+    elif model_name == "feathernetb":
+        from src.models.feathernet.FeatherNet import FeatherNetB
+        input_size = config["data"]["input_size"]
+        model = FeatherNetB(n_class=num_classes, input_size=input_size)
     else:
         raise ValueError(f"Unknown model name: {model_name}")
         

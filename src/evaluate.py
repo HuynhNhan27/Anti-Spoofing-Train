@@ -17,7 +17,7 @@ from src.train import get_model
 def parse_args():
     parser = argparse.ArgumentParser(description="Evaluate Anti-Spoofing Models")
     parser.add_argument("--model-path", type=str, required=True, help="Path to trained model weights (.pth)")
-    parser.add_argument("--config", type=str, default="src/configs/config.yaml", help="Path to config YAML")
+    parser.add_argument("--config", type=str, default="src/configs/minifasv2.yaml", help="Path to config YAML")
     parser.add_argument("--device", type=str, default="cuda" if torch.cuda.is_available() else "cpu", help="Device to run on")
     return parser.parse_args()
 
