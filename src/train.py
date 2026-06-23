@@ -287,8 +287,8 @@ def main():
             num_workers = 2
             print(f"Kaggle/Colab detected. Setting num_workers to {num_workers} to prevent CPU throttling.")
         else:
-            num_workers = os.cpu_count() or 4
-            print(f"Local machine detected. Setting num_workers to CPU count: {num_workers}")
+            num_workers = min(4, os.cpu_count() or 4)
+            print(f"Local machine detected. Setting num_workers to: {num_workers}")
     else:
         num_workers = int(num_workers)
         
@@ -320,6 +320,16 @@ def main():
     
     # 2. Get Model
     model = get_model(config, device)
+    
+    # Wrap inner model's forward for AMP (handles nn.DataParallel autocast thread-local issue)
+    if use_amp:
+        target_model = model.module if isinstance(model, nn.DataParallel) else model
+        old_forward = target_model.forward
+        def amp_forward(*args, **kwargs):
+            with torch.cuda.amp.autocast(enabled=True):
+                return old_forward(*args, **kwargs)
+        target_model.forward = amp_forward
+        print("Wrapped inner model forward pass with autocast for AMP support.")
     
     # Compile model optionally (PyTorch 2.0+)
     torch_compile = config["train"].get("torch_compile", False)
