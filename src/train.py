@@ -252,10 +252,7 @@ def main():
     print(f"Using device: {device}")
     
     # GPU optimizations
-    if device.type == "cuda":
-        torch.backends.cudnn.benchmark = True
-        print("Enabled cudnn benchmark optimization.")
-        
+
     # Detect Kaggle or Colab
     is_kaggle_or_colab = (
         "KAGGLE_KERNEL_RUN_TYPE" in os.environ or
