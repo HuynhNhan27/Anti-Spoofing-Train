@@ -56,6 +56,37 @@ def get_model(config, device):
         from src.models.feathernet.FeatherNet import FeatherNetB
         input_size = config["data"]["input_size"]
         model = FeatherNetB(n_class=num_classes, input_size=input_size)
+    elif model_name == "aenet":
+        from src.models.aenet.AENet import AENet
+        model = AENet(num_classes=num_classes)
+    elif model_name == "mobilenetv3_large":
+        from src.models.MN3.MN3 import mobilenetv3_large
+        mn3_config = config.get("model", {})
+        model = mobilenetv3_large(
+            width_mult=mn3_config.get("width_mult", 1.0),
+            prob_dropout=mn3_config.get("prob_dropout", 0.2),
+            type_dropout=mn3_config.get("type_dropout", "bernoulli"),
+            prob_dropout_linear=mn3_config.get("prob_dropout_linear", 0.2),
+            embeding_dim=mn3_config.get("embeding_dim", 128),
+            mu=mn3_config.get("mu", 0.5),
+            sigma=mn3_config.get("sigma", 0.3),
+            theta=mn3_config.get("theta", 0.7),
+            multi_heads=mn3_config.get("multi_heads", False)
+        )
+    elif model_name == "mobilenetv3_small":
+        from src.models.MN3.MN3 import mobilenetv3_small
+        mn3_config = config.get("model", {})
+        model = mobilenetv3_small(
+            width_mult=mn3_config.get("width_mult", 1.0),
+            prob_dropout=mn3_config.get("prob_dropout", 0.2),
+            type_dropout=mn3_config.get("type_dropout", "bernoulli"),
+            prob_dropout_linear=mn3_config.get("prob_dropout_linear", 0.2),
+            embeding_dim=mn3_config.get("embeding_dim", 128),
+            mu=mn3_config.get("mu", 0.5),
+            sigma=mn3_config.get("sigma", 0.3),
+            theta=mn3_config.get("theta", 0.7),
+            multi_heads=mn3_config.get("multi_heads", False)
+        )
     else:
         raise ValueError(f"Unknown model name: {model_name}")
         
