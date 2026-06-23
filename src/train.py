@@ -20,6 +20,7 @@ def parse_args():
     parser.add_argument("--epochs", type=int, default=None, help="Override training epochs")
     parser.add_argument("--batch-size", type=int, default=None, help="Override batch size")
     parser.add_argument("--lr", type=float, default=None, help="Override learning rate")
+    parser.add_argument("--data-dir", type=str, default=None, help="Override data directory path")
     return parser.parse_args()
 
 def load_config(config_path):
@@ -169,8 +170,8 @@ def train_one_epoch(model, dataloader, optimizer, criterions, device, use_fourie
         cls_output = outputs[0] if isinstance(outputs, tuple) else outputs
         _, predicted = torch.max(cls_output.data, 1)
         
-        all_labels.extend(labels.cpu().numpy())
-        all_preds.extend(predicted.cpu().numpy())
+        all_labels.append(labels.detach())
+        all_preds.append(predicted.detach())
         
         batch_acc = (predicted == labels).sum().item() / labels.size(0)
         progress_bar.set_postfix(loss=loss.item(), acc=100.0 * batch_acc)
@@ -180,8 +181,8 @@ def train_one_epoch(model, dataloader, optimizer, criterions, device, use_fourie
     epoch_loss_cls = loss_cls_accum / total
     epoch_loss_ft = loss_ft_accum / total
     
-    all_labels = np.array(all_labels)
-    all_preds = np.array(all_preds)
+    all_labels = torch.cat(all_labels).cpu().numpy()
+    all_preds = torch.cat(all_preds).cpu().numpy()
     epoch_acc = accuracy_score(all_labels, all_preds)
     epoch_f1 = f1_score(all_labels, all_preds, average='binary', zero_division=0)
     
@@ -212,12 +213,12 @@ def validate(model, dataloader, criterions, device, use_amp=False):
             running_loss += loss.item() * inputs.size(0)
             _, predicted = torch.max(outputs.data, 1)
             
-            all_labels.extend(labels.cpu().numpy())
-            all_preds.extend(predicted.cpu().numpy())
+            all_labels.append(labels.detach())
+            all_preds.append(predicted.detach())
             
     val_loss = running_loss / len(dataloader.dataset)
-    all_labels = np.array(all_labels)
-    all_preds = np.array(all_preds)
+    all_labels = torch.cat(all_labels).cpu().numpy()
+    all_preds = torch.cat(all_preds).cpu().numpy()
     
     val_acc = accuracy_score(all_labels, all_preds)
     val_f1 = f1_score(all_labels, all_preds, average='binary', zero_division=0)
@@ -250,6 +251,8 @@ def main():
         config["train"]["batch_size"] = args.batch_size
     if args.lr:
         config["train"]["lr"] = args.lr
+    if args.data_dir:
+        config["data"]["data_dir"] = args.data_dir
         
     # Environment settings
     device = torch.device(config["train"]["device"] if torch.cuda.is_available() and config["train"]["device"] == "cuda" else "cpu")
@@ -261,13 +264,34 @@ def main():
         print("Enabled cudnn benchmark optimization.")
         
     use_amp = config["train"].get("use_amp", False)
+    # Auto-disable AMP on GPUs with compute capability < 7.0 (e.g. Pascal P100)
+    if use_amp and device.type == "cuda":
+        major, minor = torch.cuda.get_device_capability(device)
+        if major < 7:
+            print(f"Warning: GPU compute capability is {major}.{minor} (< 7.0). This GPU (e.g. Pascal/P100) does not support Tensor Cores, so AMP might be slower. Disabling AMP for optimal speed.")
+            use_amp = False
+            
     if use_amp:
         print("Using Automatic Mixed Precision (AMP) training.")
         
+    # Detect Kaggle or Colab
+    is_kaggle_or_colab = (
+        "KAGGLE_KERNEL_RUN_TYPE" in os.environ or
+        "KAGGLE_URL_BASE" in os.environ or
+        "google.colab" in sys.modules
+    )
+    
     num_workers = config["train"].get("num_workers", 4)
     if num_workers == "auto":
-        num_workers = os.cpu_count() or 4
-    num_workers = int(num_workers)
+        if is_kaggle_or_colab:
+            num_workers = 2
+            print(f"Kaggle/Colab detected. Setting num_workers to {num_workers} to prevent CPU throttling.")
+        else:
+            num_workers = os.cpu_count() or 4
+            print(f"Local machine detected. Setting num_workers to CPU count: {num_workers}")
+    else:
+        num_workers = int(num_workers)
+        
     print(f"Using {num_workers} data loader workers.")
     
     os.makedirs(config["train"]["save_dir"], exist_ok=True)
