@@ -1,0 +1,21 @@
+name: anti-spoofing
+channels:
+  - pytorch
+  - conda-forge
+  - defaults
+dependencies:
+  - python=3.10
+  - pip
+  - pip:
+      - torch>=2.0.0
+      - torchvision>=0.15.0
+      - opencv-python>=4.7.0
+      - numpy>=1.22.0
+      - albumentations>=1.3.0
+      - timm>=0.9.0
+      - scikit-learn>=1.2.0
+      - pyyaml>=6.0
+      - tqdm>=4.65.0
+      - matplotlib>=3.7.0
+      - tensorboard>=2.12.0
+      - ipykernel
