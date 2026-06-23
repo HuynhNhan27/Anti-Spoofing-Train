@@ -9,6 +9,8 @@ import torch
 import torch.nn as nn
 from torch.utils.tensorboard import SummaryWriter
 from tqdm import tqdm
+import numpy as np
+from sklearn.metrics import f1_score, accuracy_score, confusion_matrix
 
 from src.data.dataset import get_dataloader
 
@@ -120,11 +122,11 @@ def compute_loss(model, outputs, labels, batch, device, criterions, use_fourier)
         loss = criterions["cls"](cls_output, labels)
         return loss, {"loss": loss.item(), "loss_cls": loss.item()}
 
-def train_one_epoch(model, dataloader, optimizer, criterions, device, use_fourier):
+def train_one_epoch(model, dataloader, optimizer, criterions, device, use_fourier, scaler=None, use_amp=False):
     model.train()
     running_loss = 0.0
-    correct = 0
-    total = 0
+    all_labels = []
+    all_preds = []
     
     # Track individual loss components
     loss_cls_accum = 0.0
@@ -138,21 +140,26 @@ def train_one_epoch(model, dataloader, optimizer, criterions, device, use_fourie
         else:
             inputs, labels = batch
             
-        inputs, labels = inputs.to(device), labels.to(device)
+        inputs, labels = inputs.to(device, non_blocking=True), labels.to(device, non_blocking=True)
         
         optimizer.zero_grad()
         
-        # Forward pass
-        outputs = model(inputs)
+        # Forward pass under autocast if AMP is enabled
+        with torch.cuda.amp.autocast(enabled=use_amp):
+            outputs = model(inputs)
+            # Calculate loss
+            loss, loss_details = compute_loss(
+                model, outputs, labels, batch, device, criterions, use_fourier
+            )
         
-        # Calculate loss
-        loss, loss_details = compute_loss(
-            model, outputs, labels, batch, device, criterions, use_fourier
-        )
-        
-        # Backward and optimize
-        loss.backward()
-        optimizer.step()
+        # Backward and optimize with GradScaler
+        if use_amp and scaler is not None:
+            scaler.scale(loss).backward()
+            scaler.step(optimizer)
+            scaler.update()
+        else:
+            loss.backward()
+            optimizer.step()
         
         running_loss += loss.item() * inputs.size(0)
         loss_cls_accum += loss_details.get("loss_cls", 0.0) * inputs.size(0)
@@ -161,23 +168,30 @@ def train_one_epoch(model, dataloader, optimizer, criterions, device, use_fourie
         # Calculate training accuracy (based on classification outputs)
         cls_output = outputs[0] if isinstance(outputs, tuple) else outputs
         _, predicted = torch.max(cls_output.data, 1)
-        total += labels.size(0)
-        correct += (predicted == labels).sum().item()
         
-        progress_bar.set_postfix(loss=loss.item(), acc=100.0 * correct / total)
+        all_labels.extend(labels.cpu().numpy())
+        all_preds.extend(predicted.cpu().numpy())
         
+        batch_acc = (predicted == labels).sum().item() / labels.size(0)
+        progress_bar.set_postfix(loss=loss.item(), acc=100.0 * batch_acc)
+        
+    total = len(dataloader.dataset)
     epoch_loss = running_loss / total
     epoch_loss_cls = loss_cls_accum / total
     epoch_loss_ft = loss_ft_accum / total
-    epoch_acc = correct / total
     
-    return epoch_loss, epoch_loss_cls, epoch_loss_ft, epoch_acc
+    all_labels = np.array(all_labels)
+    all_preds = np.array(all_preds)
+    epoch_acc = accuracy_score(all_labels, all_preds)
+    epoch_f1 = f1_score(all_labels, all_preds, average='binary', zero_division=0)
+    
+    return epoch_loss, epoch_loss_cls, epoch_loss_ft, epoch_acc, epoch_f1
 
-def validate(model, dataloader, criterions, device):
+def validate(model, dataloader, criterions, device, use_amp=False):
     model.eval()
     running_loss = 0.0
-    correct = 0
-    total = 0
+    all_labels = []
+    all_preds = []
     
     with torch.no_grad():
         for batch in tqdm(dataloader, desc="  Val", leave=False):
@@ -188,22 +202,42 @@ def validate(model, dataloader, criterions, device):
             else:
                 inputs, labels = batch
                 
-            inputs, labels = inputs.to(device), labels.to(device)
+            inputs, labels = inputs.to(device, non_blocking=True), labels.to(device, non_blocking=True)
             
-            # Forward pass: MultiFTNet in eval() mode returns only logits (not a tuple)
-            outputs = model(inputs)
-            
-            # Loss calculation
-            loss = criterions["cls"](outputs, labels)
+            # Forward pass under autocast
+            with torch.cuda.amp.autocast(enabled=use_amp):
+                outputs = model(inputs)
+                loss = criterions["cls"](outputs, labels)
             
             running_loss += loss.item() * inputs.size(0)
             _, predicted = torch.max(outputs.data, 1)
-            total += labels.size(0)
-            correct += (predicted == labels).sum().item()
             
-    val_loss = running_loss / total
-    val_acc = correct / total
-    return val_loss, val_acc
+            all_labels.extend(labels.cpu().numpy())
+            all_preds.extend(predicted.cpu().numpy())
+            
+    val_loss = running_loss / len(dataloader.dataset)
+    all_labels = np.array(all_labels)
+    all_preds = np.array(all_preds)
+    
+    val_acc = accuracy_score(all_labels, all_preds)
+    val_f1 = f1_score(all_labels, all_preds, average='binary', zero_division=0)
+    
+    cm = confusion_matrix(all_labels, all_preds, labels=[0, 1])
+    tn, fp, fn, tp = cm.ravel()
+    
+    apcer = fn / (fn + tp) if (fn + tp) > 0 else 0.0
+    bpcer = fp / (tn + fp) if (tn + fp) > 0 else 0.0
+    acer = (apcer + bpcer) / 2.0
+    
+    metrics = {
+        "loss": val_loss,
+        "acc": val_acc,
+        "f1": val_f1,
+        "apcer": apcer,
+        "bpcer": bpcer,
+        "acer": acer
+    }
+    return metrics
 
 def main():
     args = parse_args()
@@ -221,6 +255,21 @@ def main():
     device = torch.device(config["train"]["device"] if torch.cuda.is_available() and config["train"]["device"] == "cuda" else "cpu")
     print(f"Using device: {device}")
     
+    # GPU optimizations
+    if device.type == "cuda":
+        torch.backends.cudnn.benchmark = True
+        print("Enabled cudnn benchmark optimization.")
+        
+    use_amp = config["train"].get("use_amp", False)
+    if use_amp:
+        print("Using Automatic Mixed Precision (AMP) training.")
+        
+    num_workers = config["train"].get("num_workers", 4)
+    if num_workers == "auto":
+        num_workers = os.cpu_count() or 4
+    num_workers = int(num_workers)
+    print(f"Using {num_workers} data loader workers.")
+    
     os.makedirs(config["train"]["save_dir"], exist_ok=True)
     os.makedirs(config["train"]["log_dir"], exist_ok=True)
     
@@ -232,20 +281,32 @@ def main():
         batch_size=config["train"]["batch_size"],
         input_size=config["data"]["input_size"],
         use_fourier=use_fourier,
-        is_train=True
+        is_train=True,
+        num_workers=num_workers
     )
     val_loader = get_dataloader(
         data_dir=config["data"]["data_dir"],
         split="val",
         batch_size=config["train"]["batch_size"],
         input_size=config["data"]["input_size"],
-        use_fourier=use_fourier, # Pass same flag, but validation loop only runs liveness classifier
-        is_train=False
+        use_fourier=use_fourier,
+        is_train=False,
+        num_workers=num_workers
     )
     
     # 2. Get Model
     model = get_model(config, device)
     
+    # Compile model optionally (PyTorch 2.0+)
+    torch_compile = config["train"].get("torch_compile", False)
+    if torch_compile:
+        try:
+            print("Compiling model using torch.compile...")
+            model = torch.compile(model)
+            print("Model compiled successfully.")
+        except Exception as e:
+            print(f"Model compilation failed: {e}. Running uncompiled model.")
+            
     # 3. Setup criterions
     criterions = {
         "cls": nn.CrossEntropyLoss(),
@@ -270,20 +331,33 @@ def main():
     # 5. Initialize TensorBoard
     writer = SummaryWriter(log_dir=os.path.join(config["train"]["log_dir"], config["model"]["name"]))
     
-    # 6. Training loop
-    best_val_acc = 0.0
+    # 6. Early Stopping & Checkpointing Configuration
+    monitor_metric = config["train"].get("early_stopping_monitor", "f1").lower()
+    patience = config["train"].get("early_stopping_patience", 5)
+    
+    # Higher is better for accuracy and F1 score, lower is better for loss and ACER
+    higher_is_better = monitor_metric in ["f1", "acc", "accuracy"]
+    best_val_metric = -1e9 if higher_is_better else 1e9
+    epochs_no_improve = 0
+    
+    print(f"Monitoring metric '{monitor_metric}' (higher is better: {higher_is_better}) for checkpoint saving and early stopping (patience={patience}).")
+    
+    # GradScaler for AMP
+    scaler = torch.cuda.amp.GradScaler(enabled=use_amp)
+    
+    # 7. Training loop
     print(f"Starting training for model: {config['model']['name']} for {config['train']['epochs']} epochs...")
     
     for epoch in range(config["train"]["epochs"]):
         print(f"Epoch [{epoch+1}/{config['train']['epochs']}]")
         
         # Train
-        train_loss, train_loss_cls, train_loss_ft, train_acc = train_one_epoch(
-            model, train_loader, optimizer, criterions, device, use_fourier
+        train_loss, train_loss_cls, train_loss_ft, train_acc, train_f1 = train_one_epoch(
+            model, train_loader, optimizer, criterions, device, use_fourier, scaler, use_amp
         )
         
         # Validate
-        val_loss, val_acc = validate(model, val_loader, criterions, device)
+        val_metrics = validate(model, val_loader, criterions, device, use_amp)
         
         scheduler.step()
         
@@ -293,13 +367,24 @@ def main():
         if use_fourier:
             writer.add_scalar("Loss/train_ft", train_loss_ft, epoch)
         writer.add_scalar("Accuracy/train", train_acc, epoch)
-        writer.add_scalar("Loss/val", val_loss, epoch)
-        writer.add_scalar("Accuracy/val", val_acc, epoch)
+        writer.add_scalar("F1_Score/train", train_f1, epoch)
+        
+        writer.add_scalar("Loss/val", val_metrics["loss"], epoch)
+        writer.add_scalar("Accuracy/val", val_metrics["acc"], epoch)
+        writer.add_scalar("F1_Score/val", val_metrics["f1"], epoch)
+        writer.add_scalar("APCER/val", val_metrics["apcer"], epoch)
+        writer.add_scalar("BPCER/val", val_metrics["bpcer"], epoch)
+        writer.add_scalar("ACER/val", val_metrics["acer"], epoch)
+        
         writer.add_scalar("Learning_Rate", optimizer.param_groups[0]["lr"], epoch)
         
         # Print epoch metrics
-        print(f"  Train Loss: {train_loss:.4f} | Train Acc: {train_acc*100:.2f}%")
-        print(f"  Val Loss: {val_loss:.4f} | Val Acc: {val_acc*100:.2f}%")
+        print(f"  Train Loss: {train_loss:.4f} | Train Acc: {train_acc*100:.2f}% | Train F1: {train_f1*100:.2f}%")
+        print(f"  Val Loss: {val_metrics['loss']:.4f} | Val Acc: {val_metrics['acc'] * 100:.2f}% | Val F1: {val_metrics['f1'] * 100:.2f}%")
+        print(f"  APCER: {val_metrics['apcer']*100:.2f}% | BPCER: {val_metrics['bpcer']*100:.2f}% | ACER: {val_metrics['acer']*100:.2f}%")
+        
+        # Determine current monitor metric value
+        current_metric_val = val_metrics.get(monitor_metric, val_metrics["f1"])
         
         # Save checkpoints
         state = {
@@ -307,20 +392,39 @@ def main():
             "state_dict": model.state_dict(),
             "optimizer": optimizer.state_dict(),
             "scheduler": scheduler.state_dict(),
-            "best_acc": best_val_acc
+            "best_metric": best_val_metric,
+            "monitor_metric": monitor_metric
         }
         
         # Save latest
         latest_path = os.path.join(config["train"]["save_dir"], f"{config['model']['name']}_latest.pth")
         torch.save(state, latest_path)
         
-        # Save best
-        if val_acc > best_val_acc:
-            best_val_acc = val_acc
+        # Check if metric improved
+        improved = False
+        if higher_is_better:
+            if current_metric_val > best_val_metric:
+                improved = True
+        else:
+            if current_metric_val < best_val_metric:
+                improved = True
+                
+        if improved:
+            best_val_metric = current_metric_val
+            epochs_no_improve = 0
             best_path = os.path.join(config["train"]["save_dir"], f"{config['model']['name']}_best.pth")
             torch.save(state, best_path)
-            print(f"  ★ New best model saved with Val Acc: {val_acc*100:.2f}%")
-            
+            if monitor_metric != "loss":
+                print(f"  ★ New best model saved with Val {monitor_metric.upper()}: {best_val_metric*100:.2f}%")
+            else:
+                print(f"  ★ New best model saved with Val LOSS: {best_val_metric:.4f}")
+        else:
+            epochs_no_improve += 1
+            print(f"  Early stopping counter: {epochs_no_improve}/{patience}")
+            if epochs_no_improve >= patience:
+                print(f"Early stopping triggered! Training stopped because validation {monitor_metric} did not improve for {patience} epochs.")
+                break
+                
     writer.close()
     print("Training finished successfully!")
 

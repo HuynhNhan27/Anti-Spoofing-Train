@@ -190,6 +190,7 @@ def get_dataloader(data_dir, split, batch_size, input_size, use_fourier=False, i
         batch_size=batch_size,
         shuffle=is_train,
         pin_memory=True,
-        num_workers=num_workers if len(dataset) > 0 else 0
+        num_workers=num_workers if len(dataset) > 0 else 0,
+        persistent_workers=True if (num_workers > 0 and len(dataset) > 0) else False
     )
     return dataloader

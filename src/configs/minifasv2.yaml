@@ -1,6 +1,6 @@
 # Data settings
 data:
-  data_dir: "/kaggle/input/datasets/nhnhunhc/celeba-spoof-cropped-sampled/dataset" # Root dataset folder
+  data_dir: "./data/celeba-spoof-cropped-sampled/dataset" # Root dataset folder
   input_size: 128
   use_fourier: true            # MiniFASNetV2 uses Fourier maps auxiliary loss
 
@@ -13,14 +13,21 @@ model:
 
 # Training settings
 train:
-  epochs: 50
+  epochs: 20
   batch_size: 256
   lr: 0.1
   momentum: 0.9
   weight_decay: 0.0005
-  milestones: [10, 15, 22, 30]
+  milestones: [5, 10, 15]
   gamma: 0.1
   device: "cuda"
   save_dir: "models"
   log_dir: "runs"
   log_interval: 10
+  # Early stopping settings
+  early_stopping_patience: 5
+  early_stopping_monitor: "f1"
+  # GPU optimizations
+  use_amp: true
+  num_workers: "auto"
+  torch_compile: false
