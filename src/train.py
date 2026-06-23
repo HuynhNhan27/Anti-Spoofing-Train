@@ -41,6 +41,9 @@ def get_model(config, device):
         import torchvision.models as models
         model = models.resnet18(pretrained=pretrained)
         model.fc = nn.Linear(model.fc.in_features, num_classes)
+    elif model_name == "detnet59":
+        from src.models.detnet.BasicModule import MydetNet59
+        model = MydetNet59(pretrained=pretrained)
     else:
         raise ValueError(f"Unknown model name: {model_name}")
         
