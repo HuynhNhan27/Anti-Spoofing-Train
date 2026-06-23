@@ -28,6 +28,5 @@ train:
   early_stopping_patience: 5
   early_stopping_monitor: "f1"
   # GPU optimizations
-  use_amp: true
   num_workers: "auto"
   torch_compile: false

@@ -123,7 +123,7 @@ def compute_loss(model, outputs, labels, batch, device, criterions, use_fourier)
         loss = criterions["cls"](cls_output, labels)
         return loss, {"loss": loss.item(), "loss_cls": loss.item()}
 
-def train_one_epoch(model, dataloader, optimizer, criterions, device, use_fourier, scaler=None, use_amp=False):
+def train_one_epoch(model, dataloader, optimizer, criterions, device, use_fourier):
     model.train()
     running_loss = 0.0
     all_labels = []
@@ -145,22 +145,16 @@ def train_one_epoch(model, dataloader, optimizer, criterions, device, use_fourie
         
         optimizer.zero_grad()
         
-        # Forward pass under autocast if AMP is enabled
-        with torch.cuda.amp.autocast(enabled=use_amp):
-            outputs = model(inputs)
-            # Calculate loss
-            loss, loss_details = compute_loss(
-                model, outputs, labels, batch, device, criterions, use_fourier
-            )
+        # Forward pass
+        outputs = model(inputs)
+        # Calculate loss
+        loss, loss_details = compute_loss(
+            model, outputs, labels, batch, device, criterions, use_fourier
+        )
         
-        # Backward and optimize with GradScaler
-        if use_amp and scaler is not None:
-            scaler.scale(loss).backward()
-            scaler.step(optimizer)
-            scaler.update()
-        else:
-            loss.backward()
-            optimizer.step()
+        # Backward and optimize
+        loss.backward()
+        optimizer.step()
         
         running_loss += loss.item() * inputs.size(0)
         loss_cls_accum += loss_details.get("loss_cls", 0.0) * inputs.size(0)
@@ -188,7 +182,7 @@ def train_one_epoch(model, dataloader, optimizer, criterions, device, use_fourie
     
     return epoch_loss, epoch_loss_cls, epoch_loss_ft, epoch_acc, epoch_f1
 
-def validate(model, dataloader, criterions, device, use_amp=False):
+def validate(model, dataloader, criterions, device):
     model.eval()
     running_loss = 0.0
     all_labels = []
@@ -205,10 +199,9 @@ def validate(model, dataloader, criterions, device, use_amp=False):
                 
             inputs, labels = inputs.to(device, non_blocking=True), labels.to(device, non_blocking=True)
             
-            # Forward pass under autocast
-            with torch.cuda.amp.autocast(enabled=use_amp):
-                outputs = model(inputs)
-                loss = criterions["cls"](outputs, labels)
+            # Forward pass
+            outputs = model(inputs)
+            loss = criterions["cls"](outputs, labels)
             
             running_loss += loss.item() * inputs.size(0)
             _, predicted = torch.max(outputs.data, 1)
@@ -263,17 +256,6 @@ def main():
         torch.backends.cudnn.benchmark = True
         print("Enabled cudnn benchmark optimization.")
         
-    use_amp = config["train"].get("use_amp", False)
-    # Auto-disable AMP on GPUs with compute capability < 7.0 (e.g. Pascal P100)
-    if use_amp and device.type == "cuda":
-        major, minor = torch.cuda.get_device_capability(device)
-        if major < 7:
-            print(f"Warning: GPU compute capability is {major}.{minor} (< 7.0). This GPU (e.g. Pascal/P100) does not support Tensor Cores, so AMP might be slower. Disabling AMP for optimal speed.")
-            use_amp = False
-            
-    if use_amp:
-        print("Using Automatic Mixed Precision (AMP) training.")
-        
     # Detect Kaggle or Colab
     is_kaggle_or_colab = (
         "KAGGLE_KERNEL_RUN_TYPE" in os.environ or
@@ -321,16 +303,6 @@ def main():
     # 2. Get Model
     model = get_model(config, device)
     
-    # Wrap inner model's forward for AMP (handles nn.DataParallel autocast thread-local issue)
-    if use_amp:
-        target_model = model.module if isinstance(model, nn.DataParallel) else model
-        old_forward = target_model.forward
-        def amp_forward(*args, **kwargs):
-            with torch.cuda.amp.autocast(enabled=True):
-                return old_forward(*args, **kwargs)
-        target_model.forward = amp_forward
-        print("Wrapped inner model forward pass with autocast for AMP support.")
-    
     # Compile model optionally (PyTorch 2.0+)
     torch_compile = config["train"].get("torch_compile", False)
     if torch_compile:
@@ -376,8 +348,7 @@ def main():
     
     print(f"Monitoring metric '{monitor_metric}' (higher is better: {higher_is_better}) for checkpoint saving and early stopping (patience={patience}).")
     
-    # GradScaler for AMP
-    scaler = torch.cuda.amp.GradScaler(enabled=use_amp)
+
     
     # 7. Training loop
     print(f"Starting training for model: {config['model']['name']} for {config['train']['epochs']} epochs...")
@@ -387,11 +358,11 @@ def main():
         
         # Train
         train_loss, train_loss_cls, train_loss_ft, train_acc, train_f1 = train_one_epoch(
-            model, train_loader, optimizer, criterions, device, use_fourier, scaler, use_amp
+            model, train_loader, optimizer, criterions, device, use_fourier
         )
         
         # Validate
-        val_metrics = validate(model, val_loader, criterions, device, use_amp)
+        val_metrics = validate(model, val_loader, criterions, device)
         
         scheduler.step()
         
