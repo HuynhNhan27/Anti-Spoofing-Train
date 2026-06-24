@@ -21,7 +21,13 @@ def parse_args():
     parser.add_argument("--batch-size", type=int, default=None, help="Override batch size")
     parser.add_argument("--lr", type=float, default=None, help="Override learning rate")
     parser.add_argument("--data-dir", type=str, default=None, help="Override data directory path")
+    parser.add_argument("--resume", type=str, default=None, help="Path to checkpoint to resume training from")
     return parser.parse_args()
+
+def save_checkpoint(state, filepath):
+    temp_filepath = filepath + ".tmp"
+    torch.save(state, temp_filepath)
+    os.replace(temp_filepath, filepath)
 
 def load_config(config_path):
     with open(config_path, "r") as f:
@@ -345,90 +351,138 @@ def main():
     
     print(f"Monitoring metric '{monitor_metric}' (higher is better: {higher_is_better}) for checkpoint saving and early stopping (patience={patience}).")
     
-
+    start_epoch = 0
     
+    # Check if we should resume from a checkpoint
+    if args.resume:
+        if os.path.exists(args.resume):
+            print(f"Resuming training from checkpoint: {args.resume}")
+            checkpoint = torch.load(args.resume, map_location=device)
+            
+            # Load model weights
+            if isinstance(checkpoint, dict) and "state_dict" in checkpoint:
+                state_dict = checkpoint["state_dict"]
+                # Clean keys if model was trained with DataParallel but is being loaded without it
+                new_state_dict = {}
+                for k, v in state_dict.items():
+                    name = k[7:] if k.startswith("module.") else k
+                    new_state_dict[name] = v
+                if isinstance(model, nn.DataParallel):
+                    dp_state_dict = {}
+                    for k, v in new_state_dict.items():
+                        dp_state_dict[f"module.{k}"] = v
+                    new_state_dict = dp_state_dict
+                model.load_state_dict(new_state_dict)
+            else:
+                model.load_state_dict(checkpoint)
+                
+            # Load optimizer, scheduler, epoch, and metric states
+            if isinstance(checkpoint, dict):
+                if "optimizer" in checkpoint:
+                    optimizer.load_state_dict(checkpoint["optimizer"])
+                if "scheduler" in checkpoint:
+                    scheduler.load_state_dict(checkpoint["scheduler"])
+                if "epoch" in checkpoint:
+                    start_epoch = checkpoint["epoch"]
+                if "best_metric" in checkpoint:
+                    best_val_metric = checkpoint["best_metric"]
+            print(f"Resumed successfully. Starting training from epoch {start_epoch + 1}")
+        else:
+            print(f"Warning: Checkpoint not found at {args.resume}. Starting from scratch.")
+            
     # 7. Training loop
     print(f"Starting training for model: {config['model']['name']} for {config['train']['epochs']} epochs...")
     
-    for epoch in range(config["train"]["epochs"]):
-        print(f"Epoch [{epoch+1}/{config['train']['epochs']}]")
-        
-        # Train
-        train_loss, train_loss_cls, train_loss_ft, train_acc, train_f1 = train_one_epoch(
-            model, train_loader, optimizer, criterions, device, use_fourier
-        )
-        
-        # Validate
-        val_metrics = validate(model, val_loader, criterions, device)
-        
-        scheduler.step()
-        
-        # Log to TensorBoard
-        writer.add_scalar("Loss/train", train_loss, epoch)
-        writer.add_scalar("Loss/train_cls", train_loss_cls, epoch)
-        if use_fourier:
-            writer.add_scalar("Loss/train_ft", train_loss_ft, epoch)
-        writer.add_scalar("Accuracy/train", train_acc, epoch)
-        writer.add_scalar("F1_Score/train", train_f1, epoch)
-        
-        writer.add_scalar("Loss/val", val_metrics["loss"], epoch)
-        writer.add_scalar("Accuracy/val", val_metrics["acc"], epoch)
-        writer.add_scalar("F1_Score/val", val_metrics["f1"], epoch)
-        writer.add_scalar("APCER/val", val_metrics["apcer"], epoch)
-        writer.add_scalar("BPCER/val", val_metrics["bpcer"], epoch)
-        writer.add_scalar("ACER/val", val_metrics["acer"], epoch)
-        
-        writer.add_scalar("Learning_Rate", optimizer.param_groups[0]["lr"], epoch)
-        
-        # Print epoch metrics
-        print(f"  Train Loss: {train_loss:.4f} | Train Acc: {train_acc*100:.2f}% | Train F1: {train_f1*100:.2f}%")
-        print(f"  Val Loss: {val_metrics['loss']:.4f} | Val Acc: {val_metrics['acc'] * 100:.2f}% | Val F1: {val_metrics['f1'] * 100:.2f}%")
-        print(f"  APCER: {val_metrics['apcer']*100:.2f}% | BPCER: {val_metrics['bpcer']*100:.2f}% | ACER: {val_metrics['acer']*100:.2f}%")
-        
-        # Determine current monitor metric value
-        current_metric_val = val_metrics.get(monitor_metric, val_metrics["f1"])
-        
-        # Save checkpoints
-        state = {
-            "epoch": epoch + 1,
-            "state_dict": model.state_dict(),
-            "optimizer": optimizer.state_dict(),
-            "scheduler": scheduler.state_dict(),
-            "best_metric": best_val_metric,
-            "monitor_metric": monitor_metric
-        }
-        
-        # Save latest
-        latest_path = os.path.join(config["train"]["save_dir"], f"{config['model']['name']}_latest.pth")
-        torch.save(state, latest_path)
-        
-        # Check if metric improved
-        improved = False
-        if higher_is_better:
-            if current_metric_val > best_val_metric:
-                improved = True
-        else:
-            if current_metric_val < best_val_metric:
-                improved = True
-                
-        if improved:
-            best_val_metric = current_metric_val
-            epochs_no_improve = 0
-            best_path = os.path.join(config["train"]["save_dir"], f"{config['model']['name']}_best.pth")
-            torch.save(state, best_path)
-            if monitor_metric != "loss":
-                print(f"  ★ New best model saved with Val {monitor_metric.upper()}: {best_val_metric*100:.2f}%")
+    try:
+        for epoch in range(start_epoch, config["train"]["epochs"]):
+            print(f"Epoch [{epoch+1}/{config['train']['epochs']}]")
+            
+            # Train
+            train_loss, train_loss_cls, train_loss_ft, train_acc, train_f1 = train_one_epoch(
+                model, train_loader, optimizer, criterions, device, use_fourier
+            )
+            
+            # Validate
+            val_metrics = validate(model, val_loader, criterions, device)
+            
+            scheduler.step()
+            
+            # Log to TensorBoard
+            writer.add_scalar("Loss/train", train_loss, epoch)
+            writer.add_scalar("Loss/train_cls", train_loss_cls, epoch)
+            if use_fourier:
+                writer.add_scalar("Loss/train_ft", train_loss_ft, epoch)
+            writer.add_scalar("Accuracy/train", train_acc, epoch)
+            writer.add_scalar("F1_Score/train", train_f1, epoch)
+            
+            writer.add_scalar("Loss/val", val_metrics["loss"], epoch)
+            writer.add_scalar("Accuracy/val", val_metrics["acc"], epoch)
+            writer.add_scalar("F1_Score/val", val_metrics["f1"], epoch)
+            writer.add_scalar("APCER/val", val_metrics["apcer"], epoch)
+            writer.add_scalar("BPCER/val", val_metrics["bpcer"], epoch)
+            writer.add_scalar("ACER/val", val_metrics["acer"], epoch)
+            
+            writer.add_scalar("Learning_Rate", optimizer.param_groups[0]["lr"], epoch)
+            
+            # Print epoch metrics
+            print(f"  Train Loss: {train_loss:.4f} | Train Acc: {train_acc*100:.2f}% | Train F1: {train_f1*100:.2f}%")
+            print(f"  Val Loss: {val_metrics['loss']:.4f} | Val Acc: {val_metrics['acc'] * 100:.2f}% | Val F1: {val_metrics['f1'] * 100:.2f}%")
+            print(f"  APCER: {val_metrics['apcer']*100:.2f}% | BPCER: {val_metrics['bpcer']*100:.2f}% | ACER: {val_metrics['acer']*100:.2f}%")
+            
+            # Determine current monitor metric value
+            current_metric_val = val_metrics.get(monitor_metric, val_metrics["f1"])
+            
+            # Save checkpoints
+            state = {
+                "epoch": epoch + 1,
+                "state_dict": model.state_dict(),
+                "optimizer": optimizer.state_dict(),
+                "scheduler": scheduler.state_dict(),
+                "best_metric": best_val_metric,
+                "monitor_metric": monitor_metric
+            }
+            
+            # Save latest
+            latest_path = os.path.join(config["train"]["save_dir"], f"{config['model']['name']}_latest.pth")
+            save_checkpoint(state, latest_path)
+            
+            # Check if metric improved
+            improved = False
+            if higher_is_better:
+                if current_metric_val > best_val_metric:
+                    improved = True
             else:
-                print(f"  ★ New best model saved with Val LOSS: {best_val_metric:.4f}")
-        else:
-            epochs_no_improve += 1
-            print(f"  Early stopping counter: {epochs_no_improve}/{patience}")
-            if epochs_no_improve >= patience:
-                print(f"Early stopping triggered! Training stopped because validation {monitor_metric} did not improve for {patience} epochs.")
-                break
-                
-    writer.close()
-    print("Training finished successfully!")
+                if current_metric_val < best_val_metric:
+                    improved = True
+                    
+            if improved:
+                best_val_metric = current_metric_val
+                epochs_no_improve = 0
+                best_path = os.path.join(config["train"]["save_dir"], f"{config['model']['name']}_best.pth")
+                save_checkpoint(state, best_path)
+                if monitor_metric != "loss":
+                    print(f"  ★ New best model saved with Val {monitor_metric.upper()}: {best_val_metric*100:.2f}%")
+                else:
+                    print(f"  ★ New best model saved with Val LOSS: {best_val_metric:.4f}")
+            else:
+                epochs_no_improve += 1
+                print(f"  Early stopping counter: {epochs_no_improve}/{patience}")
+                if epochs_no_improve >= patience:
+                    print(f"Early stopping triggered! Training stopped because validation {monitor_metric} did not improve for {patience} epochs.")
+                    break
+                    
+        print("Training finished successfully!")
+    except KeyboardInterrupt:
+        print("\n[INFO] Training interrupted by user. Gracefully shutting down...")
+        latest_path = os.path.join(config["train"]["save_dir"], f"{config['model']['name']}_latest.pth")
+        best_path = os.path.join(config["train"]["save_dir"], f"{config['model']['name']}_best.pth")
+        if os.path.exists(best_path):
+            print(f"  ★ Best checkpoint up to the last completed epoch is saved at: {best_path}")
+        if os.path.exists(latest_path):
+            print(f"  ★ Latest checkpoint up to the last completed epoch is saved at: {latest_path}")
+    finally:
+        writer.close()
+        print("Training session closed.")
 
 if __name__ == "__main__":
     main()
