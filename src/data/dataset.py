@@ -1,5 +1,6 @@
 import os
 import cv2
+import random
 import math
 import numpy as np
 from PIL import Image
@@ -126,6 +127,14 @@ class AntiSpoofingDataset(Dataset):
                         img_path = os.path.join(root, file)
                         self.samples.append((img_path, label))
                         
+        # Subsample validation dataset to randomly select only 30% of validation images
+        if split == "val":
+            random_state = random.getstate()
+            random.seed(42)
+            num_samples = int(len(self.samples) * 0.3)
+            self.samples = random.sample(self.samples, num_samples)
+            random.setstate(random_state)
+            
         print(f"Loaded {len(self.samples)} images for split '{split}' from {self.split_dir}")
 
     def __len__(self):
