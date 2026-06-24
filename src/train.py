@@ -54,6 +54,50 @@ def get_model(config, device):
         import torchvision.models as models
         model = models.resnet18(pretrained=pretrained)
         model.fc = nn.Linear(model.fc.in_features, num_classes)
+    elif model_name in ["resnet34", "resnet50", "efficientnet_b0", "efficientnet_b1", "efficientnet_b2", "mobilenetv2", "mobilenet_v2"]:
+        import timm
+        timm_name = model_name
+        if model_name == "mobilenetv2":
+            timm_name = "mobilenetv2_100"
+        model = timm.create_model(timm_name, pretrained=pretrained, num_classes=num_classes)
+    elif model_name == "vit_small":
+        import timm
+        backbone = timm.create_model("vit_small_patch16_224", pretrained=False, num_classes=0, dynamic_img_size=True)
+        
+        class ViTSmallClassifier(nn.Module):
+            def __init__(self, backbone, num_classes):
+                super().__init__()
+                self.backbone = backbone
+                self.fc = nn.Linear(384, num_classes)
+                
+            def forward(self, x):
+                features = self.backbone(x)
+                return self.fc(features)
+                
+        model = ViTSmallClassifier(backbone, num_classes)
+        
+        # Load self-supervised pre-trained backbone weights if specified in the config
+        pretrained_backbone = config["model"].get("pretrained_backbone", "")
+        if pretrained_backbone:
+            import os
+            if os.path.exists(pretrained_backbone):
+                print(f"Loading pretrained SSL backbone weights from: {pretrained_backbone}")
+                state_dict = torch.load(pretrained_backbone, map_location="cpu")
+                # If checkpoint contains 'teacher' state dict (from train_ssl.py), extract backbone weights
+                if isinstance(state_dict, dict) and "teacher" in state_dict:
+                    teacher_state = state_dict["teacher"]
+                    backbone_state = {}
+                    for k, v in teacher_state.items():
+                        if k.startswith("backbone."):
+                            backbone_state[k.replace("backbone.", "")] = v
+                    model.backbone.load_state_dict(backbone_state, strict=True)
+                elif isinstance(state_dict, dict) and "state_dict" in state_dict:
+                    model.load_state_dict(state_dict["state_dict"])
+                else:
+                    model.backbone.load_state_dict(state_dict, strict=True)
+                print("Pretrained SSL backbone weights loaded successfully.")
+            else:
+                print(f"Warning: Pretrained backbone checkpoint not found at {pretrained_backbone}. Starting from random initialization.")
     elif model_name == "detnet59":
         from src.models.detnet.BasicModule import MydetNet59
         model = MydetNet59(pretrained=pretrained)
