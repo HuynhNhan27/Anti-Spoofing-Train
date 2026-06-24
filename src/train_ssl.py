@@ -1,4 +1,5 @@
 import os
+import random
 import sys
 import argparse
 import yaml
@@ -8,6 +9,7 @@ from torch.utils.data import DataLoader
 from torch.utils.tensorboard import SummaryWriter
 from tqdm import tqdm
 import math
+import numpy as np
 
 # Add project root to python path to resolve src.* imports
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
@@ -53,9 +55,22 @@ def save_checkpoint(state, filepath):
     torch.save(state, temp_filepath)
     os.replace(temp_filepath, filepath)
 
+def set_seed(seed=42):
+    random.seed(seed)
+    np.random.seed(seed)
+    torch.manual_seed(seed)
+    torch.cuda.manual_seed(seed)
+    torch.cuda.manual_seed_all(seed)
+    torch.backends.cudnn.deterministic = True
+    torch.backends.cudnn.benchmark = False
+
 def main():
     args = parse_args()
     config = load_config(args.config)
+    
+    # Set random seed for reproducibility
+    seed = config["train"].get("seed", 42)
+    set_seed(seed)
     
     # Override from command line if provided
     if args.epochs:

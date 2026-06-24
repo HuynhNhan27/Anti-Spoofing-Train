@@ -1,4 +1,5 @@
 import os
+import random
 import sys
 # Add project root to python path to resolve src.* imports
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
@@ -283,9 +284,22 @@ def validate(model, dataloader, criterions, device):
     }
     return metrics
 
+def set_seed(seed=42):
+    random.seed(seed)
+    np.random.seed(seed)
+    torch.manual_seed(seed)
+    torch.cuda.manual_seed(seed)
+    torch.cuda.manual_seed_all(seed)
+    torch.backends.cudnn.deterministic = True
+    torch.backends.cudnn.benchmark = False
+
 def main():
     args = parse_args()
     config = load_config(args.config)
+    
+    # Set random seed for reproducibility
+    seed = config["train"].get("seed", 42)
+    set_seed(seed)
     
     # Override settings if command line args are passed
     if args.epochs:
