@@ -1,6 +1,6 @@
 # Data settings
 data:
-  data_dir: "./data/celeba-spoof-cropped-sampled/dataset"
+  data_dir: "/root/.cache/kagglehub/datasets/nhnhunhc/celeba-spoof-cropped-sampled/versions/1/dataset"
   input_size: 224              # Global crop resolution
   local_size: 96               # Local crop resolution
   global_crops_scale: [0.4, 1.0]
