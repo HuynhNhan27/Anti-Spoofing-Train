@@ -1,6 +1,6 @@
 # Data settings
 data:
-  data_dir: "/kaggle/input/datasets/nhnhunhc/celeba-spoof-cropped-sampled/dataset"
+  data_dir: "./data/celeba-spoof-cropped-sampled/dataset"
   input_size: 224              # Standard input resolution
   use_fourier: false           # Does not use Fourier maps
 
