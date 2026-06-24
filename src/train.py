@@ -141,6 +141,37 @@ def get_model(config, device):
             theta=mn3_config.get("theta", 0.7),
             multi_heads=mn3_config.get("multi_heads", False)
         )
+    elif model_name == "lstm_cnn_single":
+        import importlib
+        module = importlib.import_module("src.models.FAS-SGTD.single_frame")
+        LstmCnnNet = module.LstmCnnNet
+        
+        input_size = config["data"]["input_size"]
+        map_size = input_size // 8
+        input_features = map_size * map_size
+        
+        model = LstmCnnNet(
+            len_seq=config["model"].get("len_seq", 1),
+            num_classes=num_classes,
+            multiplier=config["model"].get("multiplier", 2),
+            input_features=input_features
+        )
+    elif model_name == "lstm_cnn_multi":
+        import importlib
+        module = importlib.import_module("src.models.FAS-SGTD.multi_frame")
+        LstmCnnNetMultiFrame = module.LstmCnnNetMultiFrame
+        
+        input_size = config["data"]["input_size"]
+        map_size = input_size // 8
+        input_features = map_size * map_size
+        
+        model = LstmCnnNetMultiFrame(
+            len_seq=config["model"].get("len_seq", 5),
+            num_classes=num_classes,
+            multiplier=config["model"].get("multiplier", 2),
+            single_ratio=config["model"].get("single_ratio", 0.5),
+            input_features=input_features
+        )
     else:
         raise ValueError(f"Unknown model name: {model_name}")
         
