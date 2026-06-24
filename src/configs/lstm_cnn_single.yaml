@@ -1,0 +1,31 @@
+# Data settings
+data:
+  data_dir: "/kaggle/input/datasets/nhnhunhc/celeba-spoof-cropped-sampled/dataset"
+  input_size: 256
+  use_fourier: false           # Set to true if you want to use Fourier map supervision
+
+# Model settings
+model:
+  name: "lstm_cnn_single"
+  num_classes: 2
+  multiplier: 2
+
+# Training settings
+train:
+  epochs: 20
+  batch_size: 32               # Batch size for SGTD single-frame model
+  lr: 0.01
+  momentum: 0.9
+  weight_decay: 0.0005
+  milestones: [5, 10, 15]
+  gamma: 0.1
+  device: "cuda"
+  save_dir: "models"
+  log_dir: "runs"
+  log_interval: 10
+  # Early stopping settings
+  early_stopping_patience: 5
+  early_stopping_monitor: "f1"
+  # GPU optimizations
+  num_workers: "auto"
+  torch_compile: false
