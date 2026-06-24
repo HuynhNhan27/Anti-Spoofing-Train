@@ -1,6 +1,6 @@
 # Data settings
 data:
-  data_dir: "./data/celeba-spoof-cropped-sampled/dataset"
+  data_dir: "/kaggle/input/datasets/nhnhunhc/celeba-spoof-cropped-sampled/dataset"
   input_size: 224              # Resolution for ViT-Small classification
   use_fourier: false           # Does not use Fourier maps
 

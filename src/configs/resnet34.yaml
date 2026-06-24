@@ -1,6 +1,6 @@
 # Data settings
 data:
-  data_dir: "./data/celeba-spoof-cropped-sampled/dataset"
+  data_dir: "/kaggle/input/datasets/nhnhunhc/celeba-spoof-cropped-sampled/dataset"
   input_size: 224              # Standard resolution for ResNet-34
   use_fourier: false           # ResNet-34 does not use Fourier maps
 

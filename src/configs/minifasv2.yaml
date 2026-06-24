@@ -1,6 +1,6 @@
 # Data settings
 data:
-  data_dir: "./data/celeba-spoof-cropped-sampled/dataset" # Root dataset folder
+  data_dir: "/kaggle/input/datasets/nhnhunhc/celeba-spoof-cropped-sampled/dataset"
   input_size: 128
   use_fourier: true            # MiniFASNetV2 uses Fourier maps auxiliary loss
 
