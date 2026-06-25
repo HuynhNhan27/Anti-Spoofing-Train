@@ -186,12 +186,12 @@ def main():
         print(f"Spoof/Fake:      {spoof_count} ({spoof_count/len(all_image_paths)*100:.1f}%)")
         
         if has_ground_truth:
-            accuracy = correct_count / len(all_image_paths) * 100
-            print(f"Accuracy:        {correct_count}/{len(all_image_paths)} ({accuracy:.2f}%)")
+            accuracy = correct_count / len(y_true) * 100
+            print(f"Accuracy:        {correct_count}/{len(y_true)} ({accuracy:.2f}%)")
             
             # Print ROC & APCER/BPCER curves
             if len(y_true) > 1:
-                from sklearn.metrics import roc_curve, auc
+                from sklearn.metrics import roc_curve, auc, confusion_matrix
                 y_true = np.array(y_true)
                 y_score = np.array(y_score)
                 
@@ -205,9 +205,55 @@ def main():
                 eer = (fpr[idx] + fnr[idx]) / 2.0
                 eer_threshold = thresholds[idx]
                 
+                # Compute APCER & BPCER at specified threshold (args.threshold)
+                y_pred = (y_score >= args.threshold).astype(int)
+                cm = confusion_matrix(y_true, y_pred, labels=[0, 1])
+                tn, fp, fn, tp = cm.ravel()
+                apcer_at_thresh = fn / (fn + tp) if (fn + tp) > 0 else 0.0
+                bpcer_at_thresh = fp / (tn + fp) if (tn + fp) > 0 else 0.0
+                
+                # Compute APCER @ BPCER = 1%
+                # 1. Exact value by interpolation (standard ROC analysis)
+                apcer_at_bpcer_1pct_interp = 1.0 - float(np.interp(0.01, fpr, tpr))
+                # 2. Conservative value where BPCER <= 1% (ISO standard, thresholding based)
+                indices_bpcer = np.where(fpr <= 0.01)[0]
+                if len(indices_bpcer) > 0:
+                    idx_bpcer = indices_bpcer[-1]
+                    apcer_at_bpcer_1pct_cons = 1.0 - tpr[idx_bpcer]
+                    thresh_at_bpcer_1pct = thresholds[idx_bpcer]
+                else:
+                    apcer_at_bpcer_1pct_cons = 1.0
+                    thresh_at_bpcer_1pct = 1.0
+                    
+                # Compute BPCER @ APCER = 1%
+                # 1. Exact value by interpolation (standard ROC analysis)
+                bpcer_at_apcer_1pct_interp = float(np.interp(0.01, fnr[::-1], fpr[::-1]))
+                # 2. Conservative value where APCER <= 1% (ISO standard, thresholding based)
+                indices_apcer = np.where(fnr <= 0.01)[0]
+                if len(indices_apcer) > 0:
+                    idx_apcer = indices_apcer[0]
+                    bpcer_at_apcer_1pct_cons = fpr[idx_apcer]
+                    thresh_at_apcer_1pct = thresholds[idx_apcer]
+                else:
+                    bpcer_at_apcer_1pct_cons = 1.0
+                    thresh_at_apcer_1pct = 0.0
+
                 print(f"ROC-AUC Score:   {roc_auc:.4f}")
                 print(f"EER (Equal Error Rate): {eer*100:.2f}% (at threshold {eer_threshold:.4f})")
-                
+                print("-" * 50)
+                print(f"Metrics at Threshold {args.threshold:.4f}:")
+                print(f"  APCER: {apcer_at_thresh*100:.2f}% (Spoof as Real)")
+                print(f"  BPCER: {bpcer_at_thresh*100:.2f}% (Real as Spoof)")
+                print(f"  ACER:  {(apcer_at_thresh + bpcer_at_thresh)*50:.2f}%")
+                print("-" * 50)
+                print(f"Metrics at BPCER (FPR) = 1%:")
+                print(f"  APCER @ BPCER=1% (Interp): {apcer_at_bpcer_1pct_interp*100:.2f}% (TPR: {(1.0-apcer_at_bpcer_1pct_interp)*100:.2f}%)")
+                print(f"  APCER @ BPCER=1% (Cons):   {apcer_at_bpcer_1pct_cons*100:.2f}% (at threshold {thresh_at_bpcer_1pct:.4f})")
+                print("-" * 50)
+                print(f"Metrics at APCER (FNR) = 1%:")
+                print(f"  BPCER @ APCER=1% (Interp): {bpcer_at_apcer_1pct_interp*100:.2f}%")
+                print(f"  BPCER @ APCER=1% (Cons):   {bpcer_at_apcer_1pct_cons*100:.2f}% (at threshold {thresh_at_apcer_1pct:.4f})")
+                                
                 # Generate plots using matplotlib
                 try:
                     import matplotlib
@@ -260,3 +306,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+    
