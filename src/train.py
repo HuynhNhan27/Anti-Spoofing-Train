@@ -175,6 +175,29 @@ def get_model(config, device):
             single_ratio=config["model"].get("single_ratio", 0.5),
             input_features=input_features
         )
+        
+        # Load pretrained single frame model weights if specified
+        pretrained_single = config["model"].get("pretrained_single", "")
+        if pretrained_single:
+            import os
+            if os.path.exists(pretrained_single):
+                print(f"Loading pretrained Single-frame weights from: {pretrained_single}")
+                checkpoint = torch.load(pretrained_single, map_location=device)
+                
+                # Check if it has a 'state_dict' wrapper
+                state_dict = checkpoint["state_dict"] if isinstance(checkpoint, dict) and "state_dict" in checkpoint else checkpoint
+                
+                # Clean keys if model was saved with DataParallel ("module." prefix)
+                cleaned_state_dict = {}
+                for k, v in state_dict.items():
+                    name = k[7:] if k.startswith("module.") else k
+                    cleaned_state_dict[name] = v
+                
+                # Load with strict=False to only populate matching keys (face_map_net and softmax_net)
+                model.load_state_dict(cleaned_state_dict, strict=False)
+                print("Pretrained Single-frame weights loaded successfully into Multi-frame model.")
+            else:
+                print(f"Warning: Pretrained Single-frame checkpoint not found at: {pretrained_single}")
     else:
         raise ValueError(f"Unknown model name: {model_name}")
         
