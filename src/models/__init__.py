@@ -3,6 +3,7 @@ from .detnet.BasicModule import MydetNet59
 from .feathernet.FeatherNet import FeatherNetA, FeatherNetB
 from .aenet.AENet import AENet
 from .MN3.MN3 import mobilenetv3_large, mobilenetv3_small
+from .resnet_fourier import ResNet18Fourier
 
 __all__ = [
     "MultiFTNet",
@@ -12,4 +13,5 @@ __all__ = [
     "AENet",
     "mobilenetv3_large",
     "mobilenetv3_small",
+    "ResNet18Fourier",
 ]

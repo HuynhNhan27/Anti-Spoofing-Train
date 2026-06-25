@@ -51,6 +51,9 @@ def get_model(config, device):
             embedding_size=config["model"]["embedding_size"],
             conv6_kernel=conv6_kernel
         )
+    elif model_name == "resnet18_fourier":
+        from src.models.resnet_fourier import ResNet18Fourier
+        model = ResNet18Fourier(num_classes=num_classes, pretrained=pretrained)
     elif model_name == "resnet18":
         import torchvision.models as models
         model = models.resnet18(pretrained=pretrained)
@@ -372,7 +375,7 @@ def main():
     os.makedirs(config["train"]["log_dir"], exist_ok=True)
     
     # 1. Initialize Dataloaders
-    use_fourier = config["data"]["use_fourier"] and config["model"]["name"].lower() == "minifasv2"
+    use_fourier = config["data"]["use_fourier"] and (config["model"]["name"].lower() == "minifasv2" or "fourier" in config["model"]["name"].lower())
     train_loader = get_dataloader(
         data_dir=config["data"]["data_dir"],
         split="train",
