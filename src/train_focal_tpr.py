@@ -1,23 +1,59 @@
 import os
 import random
 import sys
-# Add project root to python path to resolve src.* imports
-sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
-
 import argparse
 import yaml
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 from torch.utils.tensorboard import SummaryWriter
 from tqdm import tqdm
 import numpy as np
-from sklearn.metrics import f1_score, accuracy_score, confusion_matrix
+from sklearn.metrics import f1_score, accuracy_score, confusion_matrix, roc_curve
+
+# Add project root to python path to resolve src.* imports
+sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
 from src.data.dataset import get_dataloader
 
+class FocalLoss(nn.Module):
+    """
+    Focal Loss for binary/multi-class classification.
+    FL(p_t) = -alpha_t * (1 - p_t)^gamma * log(p_t)
+    """
+    def __init__(self, alpha=None, gamma=2.0, reduction='mean'):
+        super(FocalLoss, self).__init__()
+        self.alpha = alpha
+        self.gamma = gamma
+        self.reduction = reduction
+
+    def forward(self, inputs, targets):
+        ce_loss = F.cross_entropy(inputs, targets, reduction='none')
+        pt = torch.exp(-ce_loss)  # pt is probability of correct class
+        focal_loss = ((1.0 - pt) ** self.gamma) * ce_loss
+        
+        if self.alpha is not None:
+            if isinstance(self.alpha, (float, int)):
+                # Positive class gets alpha, negative gets 1-alpha
+                alpha_t = torch.where(targets == 1, self.alpha, 1.0 - self.alpha)
+                focal_loss = alpha_t * focal_loss
+            elif isinstance(self.alpha, torch.Tensor):
+                alpha_t = self.alpha.to(inputs.device)[targets]
+                focal_loss = alpha_t * focal_loss
+            elif isinstance(self.alpha, (list, tuple)):
+                alpha_t = torch.tensor(self.alpha, device=inputs.device)[targets]
+                focal_loss = alpha_t * focal_loss
+                
+        if self.reduction == 'mean':
+            return focal_loss.mean()
+        elif self.reduction == 'sum':
+            return focal_loss.sum()
+        else:
+            return focal_loss
+
 def parse_args():
-    parser = argparse.ArgumentParser(description="Unified Anti-Spoofing Model Training")
-    parser.add_argument("--config", type=str, default="src/configs/minifasv2.yaml", help="Path to config YAML")
+    parser = argparse.ArgumentParser(description="Anti-Spoofing Training with Focal Loss and TPR @ FPR=1%")
+    parser.add_argument("--config", type=str, default="src/configs/resnet18_focal.yaml", help="Path to config YAML")
     parser.add_argument("--epochs", type=int, default=None, help="Override training epochs")
     parser.add_argument("--batch-size", type=int, default=None, help="Override batch size")
     parser.add_argument("--lr", type=float, default=None, help="Override learning rate")
@@ -40,18 +76,7 @@ def get_model(config, device):
     num_classes = config["model"]["num_classes"]
     pretrained = config["model"].get("pretrained", False)
     
-    if model_name == "minifasv2":
-        from src.models.minifasv2.model import MultiFTNet
-        input_size = config["data"]["input_size"]
-        k_size = (input_size + 15) // 16
-        conv6_kernel = (k_size, k_size)
-        model = MultiFTNet(
-            num_channels=3,
-            num_classes=num_classes,
-            embedding_size=config["model"]["embedding_size"],
-            conv6_kernel=conv6_kernel
-        )
-    elif model_name == "resnet18_fourier":
+    if model_name == "resnet18_fourier":
         from src.models.resnet_fourier import ResNet18Fourier
         model = ResNet18Fourier(num_classes=num_classes, pretrained=pretrained)
     elif model_name == "resnet18":
@@ -64,142 +89,11 @@ def get_model(config, device):
         if model_name == "mobilenetv2":
             timm_name = "mobilenetv2_100"
         model = timm.create_model(timm_name, pretrained=pretrained, num_classes=num_classes)
-    elif model_name == "vit_small":
-        import timm
-        backbone = timm.create_model("vit_small_patch16_224", pretrained=False, num_classes=0, dynamic_img_size=True)
-        
-        class ViTSmallClassifier(nn.Module):
-            def __init__(self, backbone, num_classes):
-                super().__init__()
-                self.backbone = backbone
-                self.fc = nn.Linear(384, num_classes)
-                
-            def forward(self, x):
-                features = self.backbone(x)
-                return self.fc(features)
-                
-        model = ViTSmallClassifier(backbone, num_classes)
-        
-        # Load self-supervised pre-trained backbone weights if specified in the config
-        pretrained_backbone = config["model"].get("pretrained_backbone", "")
-        if pretrained_backbone:
-            import os
-            if os.path.exists(pretrained_backbone):
-                print(f"Loading pretrained SSL backbone weights from: {pretrained_backbone}")
-                state_dict = torch.load(pretrained_backbone, map_location="cpu")
-                # If checkpoint contains 'teacher' state dict (from train_ssl.py), extract backbone weights
-                if isinstance(state_dict, dict) and "teacher" in state_dict:
-                    teacher_state = state_dict["teacher"]
-                    backbone_state = {}
-                    for k, v in teacher_state.items():
-                        if k.startswith("backbone."):
-                            backbone_state[k.replace("backbone.", "")] = v
-                    model.backbone.load_state_dict(backbone_state, strict=True)
-                elif isinstance(state_dict, dict) and "state_dict" in state_dict:
-                    model.load_state_dict(state_dict["state_dict"])
-                else:
-                    model.backbone.load_state_dict(state_dict, strict=True)
-                print("Pretrained SSL backbone weights loaded successfully.")
-            else:
-                print(f"Warning: Pretrained backbone checkpoint not found at {pretrained_backbone}. Starting from random initialization.")
-    elif model_name == "detnet59":
-        from src.models.detnet.BasicModule import MydetNet59
-        model = MydetNet59(pretrained=pretrained)
-    elif model_name == "featherneta":
-        from src.models.feathernet.FeatherNet import FeatherNetA
-        input_size = config["data"]["input_size"]
-        model = FeatherNetA(n_class=num_classes, input_size=input_size)
-    elif model_name == "feathernetb":
-        from src.models.feathernet.FeatherNet import FeatherNetB
-        input_size = config["data"]["input_size"]
-        model = FeatherNetB(n_class=num_classes, input_size=input_size)
-    elif model_name == "aenet":
-        from src.models.aenet.AENet import AENet
-        model = AENet(num_classes=num_classes)
-    elif model_name == "mobilenetv3_large":
-        from src.models.MN3.MN3 import mobilenetv3_large
-        mn3_config = config.get("model", {})
-        model = mobilenetv3_large(
-            width_mult=mn3_config.get("width_mult", 1.0),
-            prob_dropout=mn3_config.get("prob_dropout", 0.2),
-            type_dropout=mn3_config.get("type_dropout", "bernoulli"),
-            prob_dropout_linear=mn3_config.get("prob_dropout_linear", 0.2),
-            embeding_dim=mn3_config.get("embeding_dim", 128),
-            mu=mn3_config.get("mu", 0.5),
-            sigma=mn3_config.get("sigma", 0.3),
-            theta=mn3_config.get("theta", 0.7),
-            multi_heads=mn3_config.get("multi_heads", False)
-        )
-    elif model_name == "mobilenetv3_small":
-        from src.models.MN3.MN3 import mobilenetv3_small
-        mn3_config = config.get("model", {})
-        model = mobilenetv3_small(
-            width_mult=mn3_config.get("width_mult", 1.0),
-            prob_dropout=mn3_config.get("prob_dropout", 0.2),
-            type_dropout=mn3_config.get("type_dropout", "bernoulli"),
-            prob_dropout_linear=mn3_config.get("prob_dropout_linear", 0.2),
-            embeding_dim=mn3_config.get("embeding_dim", 128),
-            mu=mn3_config.get("mu", 0.5),
-            sigma=mn3_config.get("sigma", 0.3),
-            theta=mn3_config.get("theta", 0.7),
-            multi_heads=mn3_config.get("multi_heads", False)
-        )
-    elif model_name == "lstm_cnn_single":
-        import importlib
-        module = importlib.import_module("src.models.FAS-SGTD.single_frame")
-        LstmCnnNet = module.LstmCnnNet
-        
-        input_size = config["data"]["input_size"]
-        map_size = input_size // 8
-        input_features = map_size * map_size
-        
-        model = LstmCnnNet(
-            len_seq=config["model"].get("len_seq", 1),
-            num_classes=num_classes,
-            multiplier=config["model"].get("multiplier", 2),
-            input_features=input_features
-        )
-    elif model_name == "lstm_cnn_multi":
-        import importlib
-        module = importlib.import_module("src.models.FAS-SGTD.multi_frame")
-        LstmCnnNetMultiFrame = module.LstmCnnNetMultiFrame
-        
-        input_size = config["data"]["input_size"]
-        map_size = input_size // 8
-        input_features = map_size * map_size
-        
-        model = LstmCnnNetMultiFrame(
-            len_seq=config["model"].get("len_seq", 5),
-            num_classes=num_classes,
-            multiplier=config["model"].get("multiplier", 2),
-            single_ratio=config["model"].get("single_ratio", 0.5),
-            input_features=input_features
-        )
-        
-        # Load pretrained single frame model weights if specified
-        pretrained_single = config["model"].get("pretrained_single", "")
-        if pretrained_single:
-            import os
-            if os.path.exists(pretrained_single):
-                print(f"Loading pretrained Single-frame weights from: {pretrained_single}")
-                checkpoint = torch.load(pretrained_single, map_location=device)
-                
-                # Check if it has a 'state_dict' wrapper
-                state_dict = checkpoint["state_dict"] if isinstance(checkpoint, dict) and "state_dict" in checkpoint else checkpoint
-                
-                # Clean keys if model was saved with DataParallel ("module." prefix)
-                cleaned_state_dict = {}
-                for k, v in state_dict.items():
-                    name = k[7:] if k.startswith("module.") else k
-                    cleaned_state_dict[name] = v
-                
-                # Load with strict=False to only populate matching keys (face_map_net and softmax_net)
-                model.load_state_dict(cleaned_state_dict, strict=False)
-                print("Pretrained Single-frame weights loaded successfully into Multi-frame model.")
-            else:
-                print(f"Warning: Pretrained Single-frame checkpoint not found at: {pretrained_single}")
     else:
-        raise ValueError(f"Unknown model name: {model_name}")
+        raise ValueError(
+            f"This training script only supports resnet18, resnet18_fourier, resnet34, resnet50, mobilenetv2, and efficientnet models. "
+            f"Got: '{config['model']['name']}'"
+        )
         
     # Handle multi-GPU if available
     if torch.cuda.device_count() > 1:
@@ -212,8 +106,7 @@ def get_model(config, device):
 def compute_loss(model, outputs, labels, batch, device, criterions, use_fourier):
     """
     Computes loss dynamically.
-    If the model returns a tuple (classifier_outputs, fourier_outputs), 
-    computes combined Classification + Fourier auxiliary loss.
+    For Fourier model, combines Focal Classification loss and MSE Fourier auxiliary loss.
     """
     if use_fourier and isinstance(outputs, tuple):
         cls_output, ft_output = outputs
@@ -222,14 +115,52 @@ def compute_loss(model, outputs, labels, batch, device, criterions, use_fourier)
         loss_cls = criterions["cls"](cls_output, labels)
         loss_ft = criterions["ft"](ft_output, ft_target)
         
-        # 0.5 weights as standard in MiniFASNet v2
-        loss = 0.5 * loss_cls + 0.5 * loss_ft
+        loss = 0.85 * loss_cls + 0.15 * loss_ft
         return loss, {"loss": loss.item(), "loss_cls": loss_cls.item(), "loss_ft": loss_ft.item()}
     else:
-        # Standard classification loss
         cls_output = outputs[0] if isinstance(outputs, tuple) else outputs
         loss = criterions["cls"](cls_output, labels)
         return loss, {"loss": loss.item(), "loss_cls": loss.item()}
+
+def calculate_tpr_at_fpr_1percent(labels, scores):
+    """
+    Calculates TPR @ FPR = 1% (BPCER = 1%) and APCER @ BPCER = 1%.
+    Labels: 0 for Real/Live, 1 for Spoof/Fake.
+    Scores: Probability of Spoof (class 1).
+    """
+    try:
+        fpr, tpr, thresholds = roc_curve(labels, scores, pos_label=1)
+        
+        # 1. Exact value by interpolation (standard ROC analysis)
+        tpr_at_fpr_1pct_interp = float(np.interp(0.01, fpr, tpr))
+        apcer_at_bpcer_1pct_interp = 1.0 - tpr_at_fpr_1pct_interp
+        
+        # 2. Conservative value where FPR <= 1% (ISO standard, thresholding based)
+        indices = np.where(fpr <= 0.01)[0]
+        if len(indices) > 0:
+            idx = indices[-1]
+            tpr_at_fpr_1pct_cons = float(tpr[idx])
+            apcer_at_bpcer_1pct_cons = 1.0 - tpr_at_fpr_1pct_cons
+            threshold_at_fpr_1pct = float(thresholds[idx])
+        else:
+            tpr_at_fpr_1pct_cons = 0.0
+            apcer_at_bpcer_1pct_cons = 1.0
+            threshold_at_fpr_1pct = 1.0
+    except Exception as e:
+        print(f"Warning: ROC curve calculation failed: {e}. Using fallback values.")
+        tpr_at_fpr_1pct_interp = 0.0
+        apcer_at_bpcer_1pct_interp = 1.0
+        tpr_at_fpr_1pct_cons = 0.0
+        apcer_at_bpcer_1pct_cons = 1.0
+        threshold_at_fpr_1pct = 0.5
+        
+    return {
+        "tpr_at_1pct_fpr_interp": tpr_at_fpr_1pct_interp,
+        "apcer_at_1pct_bpcer_interp": apcer_at_bpcer_1pct_interp,
+        "tpr_at_1pct_fpr_cons": tpr_at_fpr_1pct_cons,
+        "apcer_at_1pct_bpcer_cons": apcer_at_bpcer_1pct_cons,
+        "threshold_at_1pct_fpr": threshold_at_fpr_1pct
+    }
 
 def train_one_epoch(model, dataloader, optimizer, criterions, device, use_fourier):
     model.train()
@@ -237,13 +168,11 @@ def train_one_epoch(model, dataloader, optimizer, criterions, device, use_fourie
     all_labels = []
     all_preds = []
     
-    # Track individual loss components
     loss_cls_accum = 0.0
     loss_ft_accum = 0.0
     
     progress_bar = tqdm(dataloader, desc="  Train", leave=False)
     for batch in progress_bar:
-        # Batch unpacking
         if use_fourier:
             inputs, _, labels = batch
         else:
@@ -252,15 +181,12 @@ def train_one_epoch(model, dataloader, optimizer, criterions, device, use_fourie
         inputs, labels = inputs.to(device, non_blocking=True), labels.to(device, non_blocking=True)
         
         optimizer.zero_grad()
-        
-        # Forward pass
         outputs = model(inputs)
-        # Calculate loss
+        
         loss, loss_details = compute_loss(
             model, outputs, labels, batch, device, criterions, use_fourier
         )
         
-        # Backward and optimize
         loss.backward()
         optimizer.step()
         
@@ -268,7 +194,6 @@ def train_one_epoch(model, dataloader, optimizer, criterions, device, use_fourie
         loss_cls_accum += loss_details.get("loss_cls", 0.0) * inputs.size(0)
         loss_ft_accum += loss_details.get("loss_ft", 0.0) * inputs.size(0)
         
-        # Calculate training accuracy (based on classification outputs)
         cls_output = outputs[0] if isinstance(outputs, tuple) else outputs
         _, predicted = torch.max(cls_output.data, 1)
         
@@ -295,11 +220,10 @@ def validate(model, dataloader, criterions, device):
     running_loss = 0.0
     all_labels = []
     all_preds = []
+    all_scores = []
     
     with torch.no_grad():
         for batch in tqdm(dataloader, desc="  Val", leave=False):
-            # For validation, we don't need FT maps, we just load images and labels
-            # But the dataloader might still return them if use_fourier=True
             if len(batch) == 3:
                 inputs, _, labels = batch
             else:
@@ -307,19 +231,26 @@ def validate(model, dataloader, criterions, device):
                 
             inputs, labels = inputs.to(device, non_blocking=True), labels.to(device, non_blocking=True)
             
-            # Forward pass
             outputs = model(inputs)
             loss = criterions["cls"](outputs, labels)
             
             running_loss += loss.item() * inputs.size(0)
+            
+            # Predict labels (threshold = 0.5)
             _, predicted = torch.max(outputs.data, 1)
+            
+            # Compute probabilities for Spoof/Fake (class 1)
+            probs = torch.softmax(outputs, dim=1)
+            spoof_scores = probs[:, 1]
             
             all_labels.append(labels.detach())
             all_preds.append(predicted.detach())
+            all_scores.append(spoof_scores.detach())
             
     val_loss = running_loss / len(dataloader.dataset)
     all_labels = torch.cat(all_labels).cpu().numpy()
     all_preds = torch.cat(all_preds).cpu().numpy()
+    all_scores = torch.cat(all_scores).cpu().numpy()
     
     val_acc = accuracy_score(all_labels, all_preds)
     val_f1 = f1_score(all_labels, all_preds, average='binary', zero_division=0)
@@ -331,13 +262,21 @@ def validate(model, dataloader, criterions, device):
     bpcer = fp / (tn + fp) if (tn + fp) > 0 else 0.0
     acer = (apcer + bpcer) / 2.0
     
+    # Calculate TPR @ FPR = 1% (and APCER @ BPCER = 1%)
+    tpr_metrics = calculate_tpr_at_fpr_1percent(all_labels, all_scores)
+    
     metrics = {
         "loss": val_loss,
         "acc": val_acc,
         "f1": val_f1,
         "apcer": apcer,
         "bpcer": bpcer,
-        "acer": acer
+        "acer": acer,
+        "tpr_at_1pct_fpr_interp": tpr_metrics["tpr_at_1pct_fpr_interp"],
+        "apcer_at_1pct_bpcer_interp": tpr_metrics["apcer_at_1pct_bpcer_interp"],
+        "tpr_at_1pct_fpr_cons": tpr_metrics["tpr_at_1pct_fpr_cons"],
+        "apcer_at_1pct_bpcer_cons": tpr_metrics["apcer_at_1pct_bpcer_cons"],
+        "threshold_at_1pct_fpr": tpr_metrics["threshold_at_1pct_fpr"]
     }
     return metrics
 
@@ -359,22 +298,18 @@ def main():
     set_seed(seed)
     
     # Override settings if command line args are passed
-    if args.epochs:
+    if args.epochs is not None:
         config["train"]["epochs"] = args.epochs
-    if args.batch_size:
+    if args.batch_size is not None:
         config["train"]["batch_size"] = args.batch_size
-    if args.lr:
+    if args.lr is not None:
         config["train"]["lr"] = args.lr
-    if args.data_dir:
+    if args.data_dir is not None:
         config["data"]["data_dir"] = args.data_dir
         
-    # Environment settings
     device = torch.device(config["train"]["device"] if torch.cuda.is_available() and config["train"]["device"] == "cuda" else "cpu")
     print(f"Using device: {device}")
     
-    # GPU optimizations
-
-    # Detect Kaggle or Colab
     is_kaggle_or_colab = (
         "KAGGLE_KERNEL_RUN_TYPE" in os.environ or
         "KAGGLE_URL_BASE" in os.environ or
@@ -398,7 +333,8 @@ def main():
     os.makedirs(config["train"]["log_dir"], exist_ok=True)
     
     # 1. Initialize Dataloaders
-    use_fourier = config["data"]["use_fourier"] and (config["model"]["name"].lower() == "minifasv2" or "fourier" in config["model"]["name"].lower())
+    model_name_lower = config["model"]["name"].lower()
+    use_fourier = config["data"]["use_fourier"] and "fourier" in model_name_lower
     
     use_randaugment = config["data"].get("use_randaugment", False)
     ra_num_ops = config["data"].get("ra_num_ops", 2)
@@ -439,14 +375,17 @@ def main():
         except Exception as e:
             print(f"Model compilation failed: {e}. Running uncompiled model.")
             
-    # 3. Setup criterions
+    # 3. Setup Criterions (Focal Loss for classification, MSE for Fourier)
+    focal_gamma = config["train"].get("focal_loss_gamma", 2.0)
+    focal_alpha = config["train"].get("focal_loss_alpha", None)
+    print(f"Initializing Focal Loss (gamma={focal_gamma}, alpha={focal_alpha}) for classification.")
+    
     criterions = {
-        "cls": nn.CrossEntropyLoss(),
+        "cls": FocalLoss(alpha=focal_alpha, gamma=focal_gamma),
         "ft": nn.MSELoss()
     }
     
     # 4. Setup Optimizer and Scheduler
-    # Use parameters of module if wrapped in DataParallel
     model_params = model.module.parameters() if isinstance(model, nn.DataParallel) else model.parameters()
     optimizer = torch.optim.SGD(
         model_params,
@@ -464,11 +403,24 @@ def main():
     writer = SummaryWriter(log_dir=os.path.join(config["train"]["log_dir"], config["model"]["name"]))
     
     # 6. Early Stopping & Checkpointing Configuration
-    monitor_metric = config["train"].get("early_stopping_monitor", "f1").lower()
+    monitor_metric = config["train"].get("early_stopping_monitor", "tpr_at_1pct_fpr_interp")
     patience = config["train"].get("early_stopping_patience", 5)
     
-    # Higher is better for accuracy and F1 score, lower is better for loss and ACER
-    higher_is_better = monitor_metric in ["f1", "acc", "accuracy"]
+    # Normalize early stopping metric name to allow user flexibility in config
+    monitor_metric_norm = monitor_metric.lower().replace("@", "_at_").replace("=", "_").replace("%", "pct")
+    if monitor_metric_norm in ["tpr_at_1pct_fpr", "tpr_at_fpr_1pct", "tpr_at_fpr_0.01", "tpr_at_1pct_fpr_interp"]:
+        monitor_metric = "tpr_at_1pct_fpr_interp"
+    elif monitor_metric_norm in ["tpr_at_1pct_fpr_cons", "tpr_at_fpr_1pct_cons", "tpr_at_fpr_0.01_cons"]:
+        monitor_metric = "tpr_at_1pct_fpr_cons"
+    elif monitor_metric_norm in ["apcer_at_1pct_bpcer", "apcer_at_bpcer_1pct", "apcer_at_bpcer_0.01", "apcer_at_1pct_bpcer_interp"]:
+        monitor_metric = "apcer_at_1pct_bpcer_interp"
+    elif monitor_metric_norm in ["apcer_at_1pct_bpcer_cons", "apcer_at_bpcer_1pct_cons", "apcer_at_bpcer_0.01_cons"]:
+        monitor_metric = "apcer_at_1pct_bpcer_cons"
+        
+    higher_is_better = monitor_metric in [
+        "f1", "acc", "accuracy", 
+        "tpr_at_1pct_fpr_interp", "tpr_at_1pct_fpr_cons"
+    ]
     best_val_metric = -1e9 if higher_is_better else 1e9
     epochs_no_improve = 0
     
@@ -482,10 +434,8 @@ def main():
             print(f"Resuming training from checkpoint: {args.resume}")
             checkpoint = torch.load(args.resume, map_location=device)
             
-            # Load model weights
             if isinstance(checkpoint, dict) and "state_dict" in checkpoint:
                 state_dict = checkpoint["state_dict"]
-                # Clean keys if model was trained with DataParallel but is being loaded without it
                 new_state_dict = {}
                 for k, v in state_dict.items():
                     name = k[7:] if k.startswith("module.") else k
@@ -499,7 +449,6 @@ def main():
             else:
                 model.load_state_dict(checkpoint)
                 
-            # Load optimizer, scheduler, epoch, and metric states
             if isinstance(checkpoint, dict):
                 if "optimizer" in checkpoint:
                     optimizer.load_state_dict(checkpoint["optimizer"])
@@ -545,15 +494,22 @@ def main():
             writer.add_scalar("BPCER/val", val_metrics["bpcer"], epoch)
             writer.add_scalar("ACER/val", val_metrics["acer"], epoch)
             
+            writer.add_scalar("TPR_at_1pct_FPR_interp/val", val_metrics["tpr_at_1pct_fpr_interp"], epoch)
+            writer.add_scalar("APCER_at_1pct_BPCER_interp/val", val_metrics["apcer_at_1pct_bpcer_interp"], epoch)
+            writer.add_scalar("TPR_at_1pct_FPR_cons/val", val_metrics["tpr_at_1pct_fpr_cons"], epoch)
+            writer.add_scalar("APCER_at_1pct_BPCER_cons/val", val_metrics["apcer_at_1pct_bpcer_cons"], epoch)
+            writer.add_scalar("Threshold_at_1pct_FPR/val", val_metrics["threshold_at_1pct_fpr"], epoch)
+            
             writer.add_scalar("Learning_Rate", optimizer.param_groups[0]["lr"], epoch)
             
             # Print epoch metrics
             print(f"  Train Loss: {train_loss:.4f} | Train Acc: {train_acc*100:.2f}% | Train F1: {train_f1*100:.2f}%")
             print(f"  Val Loss: {val_metrics['loss']:.4f} | Val Acc: {val_metrics['acc'] * 100:.2f}% | Val F1: {val_metrics['f1'] * 100:.2f}%")
             print(f"  APCER: {val_metrics['apcer']*100:.2f}% | BPCER: {val_metrics['bpcer']*100:.2f}% | ACER: {val_metrics['acer']*100:.2f}%")
+            print(f"  TPR @ FPR=1% (Interp): {val_metrics['tpr_at_1pct_fpr_interp']*100:.2f}% (APCER: {val_metrics['apcer_at_1pct_bpcer_interp']*100:.2f}%)")
+            print(f"  TPR @ FPR=1% (Cons):   {val_metrics['tpr_at_1pct_fpr_cons']*100:.2f}% (APCER: {val_metrics['apcer_at_1pct_bpcer_cons']*100:.2f}%, Thresh: {val_metrics['threshold_at_1pct_fpr']:.4f})")
             
-            # Determine current monitor metric value
-            current_metric_val = val_metrics.get(monitor_metric, val_metrics["f1"])
+            current_metric_val = val_metrics.get(monitor_metric, val_metrics["tpr_at_1pct_fpr_interp"])
             
             # Save checkpoints
             state = {
@@ -565,11 +521,9 @@ def main():
                 "monitor_metric": monitor_metric
             }
             
-            # Save latest
             latest_path = os.path.join(config["train"]["save_dir"], f"{config['model']['name']}_latest.pth")
             save_checkpoint(state, latest_path)
             
-            # Check if metric improved
             improved = False
             if higher_is_better:
                 if current_metric_val > best_val_metric:
@@ -583,10 +537,12 @@ def main():
                 epochs_no_improve = 0
                 best_path = os.path.join(config["train"]["save_dir"], f"{config['model']['name']}_best.pth")
                 save_checkpoint(state, best_path)
-                if monitor_metric != "loss":
+                if monitor_metric in ["loss"]:
+                    print(f"  ★ New best model saved with Val LOSS: {best_val_metric:.4f}")
+                elif "apcer" in monitor_metric or "bpcer" in monitor_metric or "acer" in monitor_metric:
                     print(f"  ★ New best model saved with Val {monitor_metric.upper()}: {best_val_metric*100:.2f}%")
                 else:
-                    print(f"  ★ New best model saved with Val LOSS: {best_val_metric:.4f}")
+                    print(f"  ★ New best model saved with Val {monitor_metric.upper()}: {best_val_metric*100:.2f}%")
             else:
                 epochs_no_improve += 1
                 print(f"  Early stopping counter: {epochs_no_improve}/{patience}")
