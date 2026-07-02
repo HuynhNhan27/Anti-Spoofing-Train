@@ -1,15 +1,15 @@
 # Data settings
 data:
   data_dir: "./data/celeba-spoof-cropped-sampled/dataset"
-  input_size: 224              # Standard resolution for ResNet-18
-  use_fourier: true            # Use Fourier maps supervision for auxiliary loss
+  input_size: 224              # Standard resolution for EfficientNet-B0
+  use_fourier: false           # EfficientNet-B0 does not use Fourier maps
   use_randaugment: true        # Enable custom SafeRandAugment search space
   ra_num_ops: 2                # Number of concurrent safe operations
   ra_magnitude: 9              # Magnitude parameter for SafeRandAugment
 
 # Model settings
 model:
-  name: "resnet18_fourier"
+  name: "efficientnet_b0"
   num_classes: 2
   pretrained: true
 
@@ -28,7 +28,7 @@ train:
   log_interval: 10
   # Early stopping settings
   early_stopping_patience: 5
-  early_stopping_monitor: "tpr_at_1pct_fpr_interp"
+  early_stopping_monitor: "tpr_at_1pct_fpr_interp"  # Match focal training metric
   # Focal Loss settings
   focal_loss_gamma: 2.0
   focal_loss_alpha: null

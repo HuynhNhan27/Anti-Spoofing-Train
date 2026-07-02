@@ -399,6 +399,11 @@ def main():
     
     # 1. Initialize Dataloaders
     use_fourier = config["data"]["use_fourier"] and (config["model"]["name"].lower() == "minifasv2" or "fourier" in config["model"]["name"].lower())
+    
+    use_randaugment = config["data"].get("use_randaugment", False)
+    ra_num_ops = config["data"].get("ra_num_ops", 2)
+    ra_magnitude = config["data"].get("ra_magnitude", 9)
+    
     train_loader = get_dataloader(
         data_dir=config["data"]["data_dir"],
         split="train",
@@ -406,7 +411,10 @@ def main():
         input_size=config["data"]["input_size"],
         use_fourier=use_fourier,
         is_train=True,
-        num_workers=num_workers
+        num_workers=num_workers,
+        use_randaugment=use_randaugment,
+        ra_num_ops=ra_num_ops,
+        ra_magnitude=ra_magnitude
     )
     val_loader = get_dataloader(
         data_dir=config["data"]["data_dir"],

@@ -151,25 +151,97 @@ class AntiSpoofingDataset(Dataset):
             ft_sample = torch.unsqueeze(ft_sample, 0) # Shape: (1, H, W)
             
         if self.transform is not None:
-            image = self.transform(image)
+            if isinstance(self.transform, (tuple, list)):
+                # Apply class-specific transform (0: live, 1: spoof)
+                trans = self.transform[0] if label == 0 else self.transform[1]
+                if trans is not None:
+                    image = trans(image)
+            else:
+                image = self.transform(image)
             
         if self.return_ft:
             return image, ft_sample, label
         return image, label
 
-def get_dataloader(data_dir, split, batch_size, input_size, use_fourier=False, is_train=True, num_workers=4):
+class SafeRandAugment:
+    """
+    A custom RandAugment implementation that avoids resizing, compression/expansion,
+    and severe geometric distortions, ensuring physical characteristics of spoof images
+    (like moire patterns, screen scanlines) are preserved.
+    """
+    def __init__(self, num_ops=2, magnitude=9, disable_blur=False):
+        self.num_ops = num_ops
+        self.magnitude = magnitude
+        self.disable_blur = disable_blur
+        
+    def __call__(self, img):
+        if not isinstance(img, Image.Image):
+            img = T.ToPILImage()(img)
+            
+        magnitude_factor = self.magnitude / 30.0
+        
+        operations = [
+            lambda x: F.autocontrast(x),
+            lambda x: F.equalize(x),
+            lambda x: F.solarize(x, int(255 - magnitude_factor * 255)),
+            lambda x: F.posterize(x, max(1, int(8 - magnitude_factor * 4))),
+            lambda x: F.adjust_contrast(x, 1.0 + magnitude_factor * 0.5 * random.choice([-1, 1])),
+            lambda x: F.adjust_saturation(x, 1.0 + magnitude_factor * 0.5 * random.choice([-1, 1])),
+            lambda x: F.adjust_brightness(x, 1.0 + magnitude_factor * 0.3 * random.choice([-1, 1])),
+        ]
+        
+        if not self.disable_blur:
+            operations.extend([
+                lambda x: F.adjust_sharpness(x, 1.0 + magnitude_factor * 0.8 * random.choice([-1, 1])),
+                lambda x: F.gaussian_blur(x, kernel_size=5, sigma=0.1 + magnitude_factor * 0.9)
+            ])
+        
+        ops = random.sample(operations, min(self.num_ops, len(operations)))
+        for op in ops:
+            img = op(img)
+        return img
+
+def get_dataloader(data_dir, split, batch_size, input_size, use_fourier=False, is_train=True, num_workers=4, use_randaugment=False, ra_num_ops=2, ra_magnitude=9):
     """
     Factory function to get data loader with correct augmentations.
     """
     if is_train:
-        transform = T.Compose([
+        # Patch-based training (crop input_size x input_size, pad if needed)
+        # Hạn chế biến đổi hình học (rotate max 15, horizontal flip)
+        # Thêm làm mờ nhẹ và color jitter ở ảnh live
+        # Không dùng nén/phóng ảnh (no resizing/resized crops)
+        if use_randaugment:
+            live_color_transform = SafeRandAugment(num_ops=ra_num_ops, magnitude=ra_magnitude, disable_blur=False)
+            spoof_color_transform = SafeRandAugment(num_ops=ra_num_ops, magnitude=ra_magnitude, disable_blur=True)
+        else:
+            live_color_transform = T.Compose([
+                T.ColorJitter(brightness=0.4, contrast=0.4, saturation=0.4, hue=0.1),
+                T.RandomApply([T.GaussianBlur(kernel_size=(3, 5), sigma=(0.1, 1.0))], p=0.5)
+            ])
+            spoof_color_transform = None
+            
+        transform_live = T.Compose([
             T.ToPILImage(),
-            T.RandomResizedCrop(size=(input_size, input_size), scale=(0.9, 1.1)),
-            T.ColorJitter(brightness=0.4, contrast=0.4, saturation=0.4, hue=0.1),
-            RandomRotationWithReflect(90),
+            T.RandomCrop(size=(input_size, input_size), pad_if_needed=True, padding_mode="reflect"),
+            RandomRotationWithReflect(15),
             T.RandomHorizontalFlip(),
+            live_color_transform,
             T.ToTensor(),
         ])
+        
+        spoof_transforms = [
+            T.ToPILImage(),
+            T.RandomCrop(size=(input_size, input_size), pad_if_needed=True, padding_mode="reflect"),
+            RandomRotationWithReflect(15),
+            T.RandomHorizontalFlip(),
+        ]
+        if spoof_color_transform is not None:
+            spoof_transforms.append(spoof_color_transform)
+        spoof_transforms.append(T.ToTensor())
+        
+        transform_spoof = T.Compose(spoof_transforms)
+        
+        transform = (transform_live, transform_spoof)
     else:
         transform = T.Compose([
             T.ToPILImage(),

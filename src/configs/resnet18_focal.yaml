@@ -3,6 +3,9 @@ data:
   data_dir: "./data/celeba-spoof-cropped-sampled/dataset"
   input_size: 224              # Standard resolution for ResNet-18
   use_fourier: false           # ResNet-18 does not use Fourier maps
+  use_randaugment: true        # Enable custom SafeRandAugment search space
+  ra_num_ops: 2                # Number of concurrent safe operations
+  ra_magnitude: 9              # Magnitude parameter for SafeRandAugment
 
 # Model settings
 model:

@@ -83,9 +83,15 @@ def get_model(config, device):
         import torchvision.models as models
         model = models.resnet18(pretrained=pretrained)
         model.fc = nn.Linear(model.fc.in_features, num_classes)
+    elif model_name in ["resnet34", "resnet50", "efficientnet_b0", "efficientnet_b1", "efficientnet_b2", "mobilenetv2", "mobilenet_v2"]:
+        import timm
+        timm_name = model_name
+        if model_name == "mobilenetv2":
+            timm_name = "mobilenetv2_100"
+        model = timm.create_model(timm_name, pretrained=pretrained, num_classes=num_classes)
     else:
         raise ValueError(
-            f"This training script only supports resnet18 and resnet18_fourier models. "
+            f"This training script only supports resnet18, resnet18_fourier, resnet34, resnet50, mobilenetv2, and efficientnet models. "
             f"Got: '{config['model']['name']}'"
         )
         
@@ -109,7 +115,7 @@ def compute_loss(model, outputs, labels, batch, device, criterions, use_fourier)
         loss_cls = criterions["cls"](cls_output, labels)
         loss_ft = criterions["ft"](ft_output, ft_target)
         
-        loss = 0.5 * loss_cls + 0.5 * loss_ft
+        loss = 0.85 * loss_cls + 0.15 * loss_ft
         return loss, {"loss": loss.item(), "loss_cls": loss_cls.item(), "loss_ft": loss_ft.item()}
     else:
         cls_output = outputs[0] if isinstance(outputs, tuple) else outputs
@@ -330,6 +336,10 @@ def main():
     model_name_lower = config["model"]["name"].lower()
     use_fourier = config["data"]["use_fourier"] and "fourier" in model_name_lower
     
+    use_randaugment = config["data"].get("use_randaugment", False)
+    ra_num_ops = config["data"].get("ra_num_ops", 2)
+    ra_magnitude = config["data"].get("ra_magnitude", 9)
+    
     train_loader = get_dataloader(
         data_dir=config["data"]["data_dir"],
         split="train",
@@ -337,7 +347,10 @@ def main():
         input_size=config["data"]["input_size"],
         use_fourier=use_fourier,
         is_train=True,
-        num_workers=num_workers
+        num_workers=num_workers,
+        use_randaugment=use_randaugment,
+        ra_num_ops=ra_num_ops,
+        ra_magnitude=ra_magnitude
     )
     val_loader = get_dataloader(
         data_dir=config["data"]["data_dir"],
