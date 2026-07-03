@@ -165,14 +165,14 @@ class AntiSpoofingDataset(Dataset):
 
 class SafeRandAugment:
     """
-    A custom RandAugment implementation that avoids resizing, compression/expansion,
-    and severe geometric distortions, ensuring physical characteristics of spoof images
-    (like moire patterns, screen scanlines) are preserved.
+    Tùy chỉnh RandAugment cho Face Anti-Spoofing.
+    Loại bỏ các phép biến đổi phá hủy texture (Posterize, Solarize, Equalize).
+    Áp dụng điều chỉnh định hướng để khớp phân phối EDA (Live ép giảm màu/độ nét, Spoof ép tăng).
     """
-    def __init__(self, num_ops=2, magnitude=9, disable_blur=False):
+    def __init__(self, num_ops=2, magnitude=9, is_spoof=False):
         self.num_ops = num_ops
         self.magnitude = magnitude
-        self.disable_blur = disable_blur
+        self.is_spoof = is_spoof
         
     def __call__(self, img):
         if not isinstance(img, Image.Image):
@@ -180,22 +180,34 @@ class SafeRandAugment:
             
         magnitude_factor = self.magnitude / 30.0
         
+        # CÁC PHÉP TOÁN CHUNG (Thay đổi nhẹ ánh sáng hai chiều)
         operations = [
             lambda x: F.autocontrast(x),
-            lambda x: F.equalize(x),
-            lambda x: F.solarize(x, int(255 - magnitude_factor * 255)),
-            lambda x: F.posterize(x, max(1, int(8 - magnitude_factor * 4))),
-            lambda x: F.adjust_contrast(x, 1.0 + magnitude_factor * 0.5 * random.choice([-1, 1])),
-            lambda x: F.adjust_saturation(x, 1.0 + magnitude_factor * 0.5 * random.choice([-1, 1])),
             lambda x: F.adjust_brightness(x, 1.0 + magnitude_factor * 0.3 * random.choice([-1, 1])),
+            lambda x: F.adjust_hue(x, magnitude_factor * 0.1 * random.choice([-1, 1]))
         ]
         
-        if not self.disable_blur:
+        if self.is_spoof:
+            # === LOGIC CHO SPOOF ===
+            # Spoof nhạt màu và kém tương phản -> ÉP TĂNG 
             operations.extend([
-                lambda x: F.adjust_sharpness(x, 1.0 + magnitude_factor * 0.8 * random.choice([-1, 1])),
-                lambda x: F.gaussian_blur(x, kernel_size=5, sigma=0.1 + magnitude_factor * 0.9)
+                lambda x: F.adjust_contrast(x, 1.0 + magnitude_factor * 0.4), # Chỉ tăng > 1.0
+                lambda x: F.adjust_saturation(x, 1.0 + magnitude_factor * 0.5), # Chỉ tăng > 1.0
             ])
-        
+            # Tuyệt đối không thêm Blur hay Sharpness vào Spoof
+        else:
+            # === LOGIC CHO LIVE ===
+            # Live màu rực rỡ và rất sắc nét -> ÉP GIẢM
+            operations.extend([
+                lambda x: F.adjust_contrast(x, max(0.5, 1.0 - magnitude_factor * 0.4)), # Chỉ giảm < 1.0
+                lambda x: F.adjust_saturation(x, max(0.4, 1.0 - magnitude_factor * 0.6)), # Chỉ giảm < 1.0
+                # Factor < 1.0 trong adjust_sharpness tương đương với làm mờ đi
+                lambda x: F.adjust_sharpness(x, max(0.1, 1.0 - magnitude_factor * 0.8)), 
+                # Thêm Gaussian Blur với kernel ngẫu nhiên
+                lambda x: F.gaussian_blur(x, kernel_size=random.choice([3, 5, 7]), sigma=0.5 + magnitude_factor)
+            ])
+            
+        # Randomly apply operations
         ops = random.sample(operations, min(self.num_ops, len(operations)))
         for op in ops:
             img = op(img)
@@ -211,33 +223,41 @@ def get_dataloader(data_dir, split, batch_size, input_size, use_fourier=False, i
         # Thêm làm mờ nhẹ và color jitter ở ảnh live
         # Không dùng nén/phóng ảnh (no resizing/resized crops)
         if use_randaugment:
-            live_color_transform = SafeRandAugment(num_ops=ra_num_ops, magnitude=ra_magnitude, disable_blur=False)
-            spoof_color_transform = SafeRandAugment(num_ops=ra_num_ops, magnitude=ra_magnitude, disable_blur=True)
+            live_color_transform = SafeRandAugment(num_ops=ra_num_ops, magnitude=ra_magnitude, is_spoof=False)
+            spoof_color_transform = SafeRandAugment(num_ops=ra_num_ops, magnitude=ra_magnitude, is_spoof=True)
         else:
             live_color_transform = T.Compose([
-                T.ColorJitter(brightness=0.4, contrast=0.4, saturation=0.4, hue=0.1),
-                T.RandomApply([T.GaussianBlur(kernel_size=(3, 5), sigma=(0.1, 1.0))], p=0.5)
+                # Ép Saturation CHỈ GIẢM (0.4 đến 1.0), giữ nguyên hoặc giảm Contrast
+                T.ColorJitter(brightness=0.2, contrast=(0.6, 1.0), saturation=(0.4, 1.0), hue=0.05),
+                # Tăng kernel_size lên một chút (5, 7) để đảm bảo đủ mờ
+                T.RandomApply([T.GaussianBlur(kernel_size=(5, 7), sigma=(0.5, 1.5))], p=0.5)
             ])
-            spoof_color_transform = None
+            
+            spoof_color_transform = T.Compose([
+                # Ép Saturation CHỈ TĂNG (1.0 đến 1.4), giữ nguyên hoặc tăng Contrast
+                T.ColorJitter(brightness=0.2, contrast=(1.0, 1.3), saturation=(1.0, 1.4), hue=0.05),
+            ])
             
         transform_live = T.Compose([
             T.ToPILImage(),
-            T.RandomCrop(size=(input_size, input_size), pad_if_needed=True, padding_mode="reflect"),
+            T.RandomCrop(size=(224, 224)),
             RandomRotationWithReflect(15),
             T.RandomHorizontalFlip(),
             live_color_transform,
             T.ToTensor(),
+            T.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])
         ])
         
         spoof_transforms = [
             T.ToPILImage(),
-            T.RandomCrop(size=(input_size, input_size), pad_if_needed=True, padding_mode="reflect"),
+            T.RandomCrop(size=(224, 224)),
             RandomRotationWithReflect(15),
             T.RandomHorizontalFlip(),
         ]
         if spoof_color_transform is not None:
             spoof_transforms.append(spoof_color_transform)
         spoof_transforms.append(T.ToTensor())
+        spoof_transforms.append(T.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]))
         
         transform_spoof = T.Compose(spoof_transforms)
         
@@ -245,13 +265,13 @@ def get_dataloader(data_dir, split, batch_size, input_size, use_fourier=False, i
     else:
         transform = T.Compose([
             T.ToPILImage(),
-            SquarePad(),
-            T.Resize((input_size, input_size)),
+            T.CenterCrop(224),
             T.ToTensor(),
+            T.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])
         ])
         
-    # Calculate fourier size: input_size=128 -> (16, 16)
-    k_size = (input_size + 15) // 16
+    # Calculate fourier size based on the final image size (224x224)
+    k_size = (224 + 15) // 16
     fourier_size = (k_size * 2, k_size * 2)
     
     dataset = AntiSpoofingDataset(

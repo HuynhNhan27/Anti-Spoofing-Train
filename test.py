@@ -6,6 +6,7 @@ import torch
 import numpy as np
 from PIL import Image
 import torchvision.transforms as T
+from torch.utils.data import Dataset, DataLoader
 
 # Add project root to python path to resolve src.* imports
 sys.path.append(os.path.abspath(os.path.dirname(__file__)))
@@ -22,7 +23,40 @@ def parse_args():
     parser.add_argument("--device", type=str, default="cuda" if torch.cuda.is_available() else "cpu", help="Device to run on")
     parser.add_argument("--threshold", type=float, default=0.5, help="Classification threshold (above is spoof)")
     parser.add_argument("--plot-path", type=str, default="evaluation_plots.png", help="Path to save the evaluation plots")
+    parser.add_argument("--batch-size", type=int, default=128, help="Batch size for directory testing")
+    parser.add_argument("--num-workers", type=int, default=4, help="Number of workers for directory data loading")
     return parser.parse_args()
+
+class InferenceDataset(Dataset):
+    def __init__(self, image_paths, transform):
+        self.image_paths = image_paths
+        self.transform = transform
+
+    def __len__(self):
+        return len(self.image_paths)
+
+    def __getitem__(self, idx):
+        file_path = self.image_paths[idx]
+        img = cv2.imread(file_path)
+        if img is None:
+            img = np.zeros((224, 224, 3), dtype=np.uint8)
+        
+        img_rgb = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
+        pil_img = Image.fromarray(img_rgb)
+        tensor_img = self.transform(pil_img)
+        
+        # Determine ground truth from path parts
+        gt_label = -1
+        has_gt = False
+        path_parts = file_path.lower().replace('\\', '/').split('/')
+        if 'live' in path_parts or 'real' in path_parts:
+            gt_label = 0
+            has_gt = True
+        elif 'spoof' in path_parts or 'fake' in path_parts:
+            gt_label = 1
+            has_gt = True
+            
+        return tensor_img, file_path, gt_label, has_gt
 
 def predict_single(model, image_path, config, transform, device, threshold):
     # Read image
@@ -123,7 +157,21 @@ def main():
             print(f"No image files found recursively in {input_path}")
             return
             
-        print(f"Found {len(all_image_paths)} images. Running inference...")
+        print(f"Found {len(all_image_paths)} images. Setting up DataLoader...")
+        
+        # Determine sequence parameters
+        model_name = config["model"]["name"].lower()
+        is_sequence = "lstm" in model_name or "multi_frame" in model_name
+        len_seq = config["model"].get("len_seq", 5 if "multi" in model_name else 1)
+
+        dataset = InferenceDataset(sorted(all_image_paths), transform)
+        dataloader = DataLoader(
+            dataset,
+            batch_size=args.batch_size,
+            shuffle=False,
+            num_workers=args.num_workers,
+            pin_memory=True if device.type == "cuda" else False
+        )
         
         real_count = 0
         spoof_count = 0
@@ -133,52 +181,47 @@ def main():
         y_true = []
         y_score = []
         
-        # Column headers
-        print(f"{'Relative Path':<50} | {'Prediction':<12} | {'Ground Truth':<12} | {'Prob Real':<10} | {'Prob Spoof':<10}")
-        print("-" * 105)
+        print(f"Running batch inference (batch_size={args.batch_size}, num_workers={args.num_workers})...")
+        from tqdm import tqdm
         
-        for file_path in sorted(all_image_paths):
-            result = predict_single(model, file_path, config, transform, device, args.threshold)
-            if result:
-                # Get path relative to the input folder
-                rel_path = os.path.relpath(file_path, input_path)
+        with torch.no_grad():
+            for batch_tensors, batch_paths, batch_gt, batch_has_gt in tqdm(dataloader, desc="Evaluating Directory"):
+                if is_sequence:
+                    batch_tensors = batch_tensors.unsqueeze(1).repeat(1, len_seq, 1, 1, 1)
                 
-                # Determine ground truth from path
-                gt = None
-                path_parts = rel_path.lower().split(os.sep)
-                if 'live' in path_parts or 'real' in path_parts:
-                    gt = "Real/Live"
-                    has_ground_truth = True
-                    y_true.append(0)
-                    y_score.append(result["prob_spoof"])
-                elif 'spoof' in path_parts or 'fake' in path_parts:
-                    gt = "Spoof/Fake"
-                    has_ground_truth = True
-                    y_true.append(1)
-                    y_score.append(result["prob_spoof"])
+                batch_tensors = batch_tensors.to(device)
+                outputs = model(batch_tensors)
                 
-                # Count stats
-                if result["prediction"] == "Real/Live":
-                    real_count += 1
-                else:
-                    spoof_count += 1
+                if isinstance(outputs, tuple):
+                    outputs = outputs[0]
                     
-                # Accuracy tracking
-                is_correct_str = ""
-                if gt is not None:
-                    if result["prediction"] == gt:
-                        correct_count += 1
-                        is_correct_str = "✓"
+                probs = torch.softmax(outputs, dim=1)
+                prob_spoof = probs[:, 1].cpu().numpy()
+                prob_real = probs[:, 0].cpu().numpy()
+                
+                for idx in range(len(batch_paths)):
+                    p_spoof = float(prob_spoof[idx])
+                    p_real = float(prob_real[idx])
+                    gt_idx = int(batch_gt[idx])
+                    has_gt = bool(batch_has_gt[idx])
+                    
+                    prediction = "Spoof/Fake" if p_spoof >= args.threshold else "Real/Live"
+                    
+                    if prediction == "Real/Live":
+                        real_count += 1
                     else:
-                        is_correct_str = "✗"
-                
-                # gt_display = gt if gt is not None else "Unknown"
-                # pred_display = f"{result['prediction']} {is_correct_str}".strip()
-                
-                # Print row (truncate relative path if too long)
-                # display_path = rel_path if len(rel_path) <= 48 else "..." + rel_path[-45:]
-                # print(f"{display_path:<50} | {pred_display:<12} | {gt_display:<12} | {result['prob_real']:.4f}     | {result['prob_spoof']:.4f}")
-                
+                        spoof_count += 1
+                        
+                    if has_gt:
+                        has_ground_truth = True
+                        y_true.append(gt_idx)
+                        y_score.append(p_spoof)
+                        
+                        # Compare prediction with gt
+                        gt_str = "Real/Live" if gt_idx == 0 else "Spoof/Fake"
+                        if prediction == gt_str:
+                            correct_count += 1
+                            
         print("-" * 105)
         print(f"Summary:")
         print(f"Total processed: {len(all_image_paths)}")
