@@ -165,39 +165,49 @@ class AntiSpoofingDataset(Dataset):
 
 class SafeRandAugment:
     """
-    Tùy chỉnh RandAugment cho Face Anti-Spoofing (Dựa trên Train-EDA cân bằng).
-    - Loại bỏ các phép toán băm nát texture (Posterize, Solarize, Equalize).
-    - Áp dụng nhiễu loạn đối xứng (Symmetric Jitter) nhẹ nhàng cho CẢ 2 nhãn.
-    - Không làm mờ quá tay để giữ nguyên phân phối Sharpness gốc.
+    Tùy chỉnh RandAugment cho Face Anti-Spoofing.
+    Loại bỏ các phép biến đổi phá hủy texture (Posterize, Solarize, Equalize).
+    Áp dụng điều chỉnh định hướng để khớp phân phối EDA (Live ép giảm màu/độ nét, Spoof ép tăng).
     """
-    def __init__(self, num_ops=2, magnitude=9):
+    def __init__(self, num_ops=2, magnitude=9, is_spoof=False):
         self.num_ops = num_ops
-        # Giảm scale của magnitude xuống để các phép biến đổi "nhẹ tay" hơn
         self.magnitude = magnitude
+        self.is_spoof = is_spoof
         
     def __call__(self, img):
         if not isinstance(img, Image.Image):
             img = T.ToPILImage()(img)
             
-        # Hệ số tác động (tối đa ~0.3 tức là thay đổi +- 30%)
-        mag_factor = self.magnitude / 30.0 
+        magnitude_factor = self.magnitude / 30.0
         
+        # CÁC PHÉP TOÁN CHUNG (Thay đổi nhẹ ánh sáng hai chiều)
         operations = [
             lambda x: F.autocontrast(x),
-            # Contrast: Nhiễu loạn +- 30%
-            lambda x: F.adjust_contrast(x, 1.0 + mag_factor * random.choice([-1, 1])),
-            # Brightness: Nhiễu loạn +- 30%
-            lambda x: F.adjust_brightness(x, 1.0 + mag_factor * random.choice([-1, 1])),
-            # Saturation: Nhiễu loạn +- 30% (Vì 2 class đang khá sát nhau ở mốc 60-55)
-            lambda x: F.adjust_saturation(x, 1.0 + mag_factor * random.choice([-1, 1])),
-            # Hue: Nhiễu cực nhẹ (+- 5%) để giữ lại đặc trưng màu màn hình/mực in
-            lambda x: F.adjust_hue(x, (mag_factor * 0.15) * random.choice([-1, 1])),
-            # Sharpness: Chủ yếu là làm mờ đi một chút hoặc giữ nguyên, hiếm khi làm nét
-            lambda x: F.adjust_sharpness(x, max(0.2, 1.0 - mag_factor * 1.5 * random.random())), 
-            # Gaussian Blur: Kernel nhỏ (3) để thỉnh thoảng tạo độ rung mờ nhẹ
-            lambda x: F.gaussian_blur(x, kernel_size=3, sigma=0.1 + mag_factor)
+            lambda x: F.adjust_brightness(x, 1.0 + magnitude_factor * 0.3 * random.choice([-1, 1])),
+            lambda x: F.adjust_hue(x, magnitude_factor * 0.1 * random.choice([-1, 1]))
         ]
+        
+        if self.is_spoof:
+            # === LOGIC CHO SPOOF ===
+            # Spoof nhạt màu và kém tương phản -> ÉP TĂNG 
+            operations.extend([
+                lambda x: F.adjust_contrast(x, 1.0 + magnitude_factor * 0.4), # Chỉ tăng > 1.0
+                lambda x: F.adjust_saturation(x, 1.0 + magnitude_factor * 0.5), # Chỉ tăng > 1.0
+            ])
+            # Tuyệt đối không thêm Blur hay Sharpness vào Spoof
+        else:
+            # === LOGIC CHO LIVE ===
+            # Live màu rực rỡ và rất sắc nét -> ÉP GIẢM
+            operations.extend([
+                lambda x: F.adjust_contrast(x, max(0.5, 1.0 - magnitude_factor * 0.4)), # Chỉ giảm < 1.0
+                lambda x: F.adjust_saturation(x, max(0.4, 1.0 - magnitude_factor * 0.6)), # Chỉ giảm < 1.0
+                # Factor < 1.0 trong adjust_sharpness tương đương với làm mờ đi
+                lambda x: F.adjust_sharpness(x, max(0.1, 1.0 - magnitude_factor * 0.8)), 
+                # Thêm Gaussian Blur với kernel ngẫu nhiên
+                lambda x: F.gaussian_blur(x, kernel_size=random.choice([3, 5, 7]), sigma=0.5 + magnitude_factor)
+            ])
             
+        # Randomly apply operations
         ops = random.sample(operations, min(self.num_ops, len(operations)))
         for op in ops:
             img = op(img)
@@ -210,41 +220,52 @@ def get_dataloader(data_dir, split, batch_size, input_size, use_fourier=False, i
     if is_train:
         # Patch-based training (crop input_size x input_size, pad if needed)
         # Hạn chế biến đổi hình học (rotate max 15, horizontal flip)
+        # Thêm làm mờ nhẹ và color jitter ở ảnh live
         # Không dùng nén/phóng ảnh (no resizing/resized crops)
-        
         if use_randaugment:
-            # Dùng chung một cấu hình SafeRandAugment cho cả 2 nhãn (Symmetric)
-            # Lưu ý: Cần đảm bảo class SafeRandAugment đã được cập nhật (bỏ logic is_spoof)
-            color_transform = SafeRandAugment(num_ops=ra_num_ops, magnitude=ra_magnitude)
+            live_color_transform = SafeRandAugment(num_ops=ra_num_ops, magnitude=ra_magnitude, is_spoof=False)
+            spoof_color_transform = SafeRandAugment(num_ops=ra_num_ops, magnitude=ra_magnitude, is_spoof=True)
         else:
-            color_transform = T.Compose([
-                # Nhiễu loạn đối xứng: Dao động +- 30% cho cả 2 nhãn, Hue thay đổi nhẹ +- 5%
-                T.ColorJitter(brightness=0.3, contrast=0.3, saturation=0.3, hue=0.05),
-                # Làm mờ nhẹ ngẫu nhiên (xác suất 20%) với kernel nhỏ cho cả 2 nhãn
-                T.RandomApply([T.GaussianBlur(kernel_size=3, sigma=(0.1, 1.0))], p=0.2)
+            live_color_transform = T.Compose([
+                # Ép Saturation CHỈ GIẢM (0.4 đến 1.0), giữ nguyên hoặc giảm Contrast
+                T.ColorJitter(brightness=0.2, contrast=(0.6, 1.0), saturation=(0.4, 1.0), hue=0.05),
+                # Tăng kernel_size lên một chút (5, 7) để đảm bảo đủ mờ
+                T.RandomApply([T.GaussianBlur(kernel_size=(5, 7), sigma=(0.5, 1.5))], p=0.5)
             ])
             
-        # Một Pipeline duy nhất cho tập Train
-        transform_train = T.Compose([
+            spoof_color_transform = T.Compose([
+                # Ép Saturation CHỈ TĂNG (1.0 đến 1.4), giữ nguyên hoặc tăng Contrast
+                T.ColorJitter(brightness=0.2, contrast=(1.0, 1.3), saturation=(1.0, 1.4), hue=0.05),
+            ])
+            
+        transform_live = T.Compose([
             T.ToPILImage(),
-            # Thêm lại pad_if_needed=True để tránh lỗi nếu ảnh có chiều < 224 (VD: 160x240)
-            T.RandomCrop(size=(224, 224), pad_if_needed=True, padding_mode="reflect"),
+            T.RandomCrop(size=(224, 224)),
             RandomRotationWithReflect(15),
             T.RandomHorizontalFlip(),
-            color_transform, # Áp dụng màu sắc/độ nét chung
+            live_color_transform,
             T.ToTensor(),
             T.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])
         ])
         
-        # Nếu class Dataset của bạn được thiết kế để nhận tuple (transform_live, transform_spoof)
-        # Ta gán transform_train cho cả hai để giữ nguyên cấu trúc code cũ mà không gây lỗi
-        transform = (transform_train, transform_train)  
+        spoof_transforms = [
+            T.ToPILImage(),
+            T.RandomCrop(size=(224, 224)),
+            RandomRotationWithReflect(15),
+            T.RandomHorizontalFlip(),
+        ]
+        if spoof_color_transform is not None:
+            spoof_transforms.append(spoof_color_transform)
+        spoof_transforms.append(T.ToTensor())
+        spoof_transforms.append(T.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]))
+        
+        transform_spoof = T.Compose(spoof_transforms)
+        
+        transform = (transform_live, transform_spoof)
     else:
         transform = T.Compose([
             T.ToPILImage(),
-            # Đảm bảo Val/Test cũng có Pad nếu ảnh nhỏ hơn 224 để CenterCrop không văng lỗi
-            # Tùy thuộc vào việc bạn viết custom SquarePad như trước hay dùng mặc định của PyTorch
-            T.CenterCrop(224), 
+            T.CenterCrop(224),
             T.ToTensor(),
             T.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])
         ])
