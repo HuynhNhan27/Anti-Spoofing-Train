@@ -23,13 +23,7 @@ def preprocess_images():
     if args.dry_run:
         print("[DRY RUN MODE] No changes will be written to disk.")
         
-    # ImageNet mean values in range [0, 255]
-    # Note: cv2 reads in BGR by default, so we specify the mean in BGR format:
-    # R: 0.485 * 255 = 123.675
-    # G: 0.456 * 255 = 116.28
-    # B: 0.406 * 255 = 103.53
-    imagenet_mean_bgr = (103.53, 116.28, 123.675)
-    
+
     image_extensions = (".png", ".jpg", ".jpeg", ".bmp")
     all_image_paths = []
     
@@ -70,15 +64,14 @@ def preprocess_images():
             padded_count += 1
             
             if not args.dry_run:
-                # Apply padding using ImageNet mean value
+                # Apply padding using boundary reflection (Reflect Padding)
                 padded_img = cv2.copyMakeBorder(
                     img, 
                     pad_top, 
                     pad_bottom, 
                     pad_left, 
                     pad_right, 
-                    borderType=cv2.BORDER_CONSTANT, 
-                    value=imagenet_mean_bgr
+                    borderType=cv2.BORDER_REFLECT_101
                 )
                 # Overwrite original image
                 cv2.imwrite(path, padded_img)
