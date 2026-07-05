@@ -165,37 +165,39 @@ class AntiSpoofingDataset(Dataset):
 
 class SafeRandAugment:
     """
-    A custom RandAugment implementation that avoids resizing, compression/expansion,
-    and severe geometric distortions, ensuring physical characteristics of spoof images
-    (like moire patterns, screen scanlines) are preserved.
+    Tùy chỉnh RandAugment cho Face Anti-Spoofing (Dựa trên Train-EDA cân bằng).
+    - Loại bỏ các phép toán băm nát texture (Posterize, Solarize, Equalize).
+    - Áp dụng nhiễu loạn đối xứng (Symmetric Jitter) nhẹ nhàng cho CẢ 2 nhãn.
+    - Không làm mờ quá tay để giữ nguyên phân phối Sharpness gốc.
     """
-    def __init__(self, num_ops=2, magnitude=9, disable_blur=False):
+    def __init__(self, num_ops=2, magnitude=9):
         self.num_ops = num_ops
+        # Giảm scale của magnitude xuống để các phép biến đổi "nhẹ tay" hơn
         self.magnitude = magnitude
-        self.disable_blur = disable_blur
         
     def __call__(self, img):
         if not isinstance(img, Image.Image):
             img = T.ToPILImage()(img)
             
-        magnitude_factor = self.magnitude / 30.0
+        # Hệ số tác động (tối đa ~0.3 tức là thay đổi +- 30%)
+        mag_factor = self.magnitude / 30.0 
         
         operations = [
             lambda x: F.autocontrast(x),
-            lambda x: F.equalize(x),
-            lambda x: F.solarize(x, int(255 - magnitude_factor * 255)),
-            lambda x: F.posterize(x, max(1, int(8 - magnitude_factor * 4))),
-            lambda x: F.adjust_contrast(x, 1.0 + magnitude_factor * 0.5 * random.choice([-1, 1])),
-            lambda x: F.adjust_saturation(x, 1.0 + magnitude_factor * 0.5 * random.choice([-1, 1])),
-            lambda x: F.adjust_brightness(x, 1.0 + magnitude_factor * 0.3 * random.choice([-1, 1])),
+            # Contrast: Nhiễu loạn +- 30%
+            lambda x: F.adjust_contrast(x, 1.0 + mag_factor * random.choice([-1, 1])),
+            # Brightness: Nhiễu loạn +- 30%
+            lambda x: F.adjust_brightness(x, 1.0 + mag_factor * random.choice([-1, 1])),
+            # Saturation: Nhiễu loạn +- 30% (Vì 2 class đang khá sát nhau ở mốc 60-55)
+            lambda x: F.adjust_saturation(x, 1.0 + mag_factor * random.choice([-1, 1])),
+            # Hue: Nhiễu cực nhẹ (+- 5%) để giữ lại đặc trưng màu màn hình/mực in
+            lambda x: F.adjust_hue(x, (mag_factor * 0.15) * random.choice([-1, 1])),
+            # Sharpness: Chủ yếu là làm mờ đi một chút hoặc giữ nguyên, hiếm khi làm nét
+            lambda x: F.adjust_sharpness(x, max(0.2, 1.0 - mag_factor * 1.5 * random.random())), 
+            # Gaussian Blur: Kernel nhỏ (3) để thỉnh thoảng tạo độ rung mờ nhẹ
+            lambda x: F.gaussian_blur(x, kernel_size=3, sigma=0.1 + mag_factor)
         ]
-        
-        if not self.disable_blur:
-            operations.extend([
-                lambda x: F.adjust_sharpness(x, 1.0 + magnitude_factor * 0.8 * random.choice([-1, 1])),
-                lambda x: F.gaussian_blur(x, kernel_size=5, sigma=0.1 + magnitude_factor * 0.9)
-            ])
-        
+            
         ops = random.sample(operations, min(self.num_ops, len(operations)))
         for op in ops:
             img = op(img)
@@ -208,50 +210,47 @@ def get_dataloader(data_dir, split, batch_size, input_size, use_fourier=False, i
     if is_train:
         # Patch-based training (crop input_size x input_size, pad if needed)
         # Hạn chế biến đổi hình học (rotate max 15, horizontal flip)
-        # Thêm làm mờ nhẹ và color jitter ở ảnh live
         # Không dùng nén/phóng ảnh (no resizing/resized crops)
+        
         if use_randaugment:
-            live_color_transform = SafeRandAugment(num_ops=ra_num_ops, magnitude=ra_magnitude, disable_blur=False)
-            spoof_color_transform = SafeRandAugment(num_ops=ra_num_ops, magnitude=ra_magnitude, disable_blur=True)
+            # Dùng chung một cấu hình SafeRandAugment cho cả 2 nhãn (Symmetric)
+            # Lưu ý: Cần đảm bảo class SafeRandAugment đã được cập nhật (bỏ logic is_spoof)
+            color_transform = SafeRandAugment(num_ops=ra_num_ops, magnitude=ra_magnitude)
         else:
-            live_color_transform = T.Compose([
-                T.ColorJitter(brightness=0.4, contrast=0.4, saturation=0.4, hue=0.1),
-                T.RandomApply([T.GaussianBlur(kernel_size=(3, 5), sigma=(0.1, 1.0))], p=0.5)
+            color_transform = T.Compose([
+                # Nhiễu loạn đối xứng: Dao động +- 30% cho cả 2 nhãn, Hue thay đổi nhẹ +- 5%
+                T.ColorJitter(brightness=0.3, contrast=0.3, saturation=0.3, hue=0.05),
+                # Làm mờ nhẹ ngẫu nhiên (xác suất 20%) với kernel nhỏ cho cả 2 nhãn
+                T.RandomApply([T.GaussianBlur(kernel_size=3, sigma=(0.1, 1.0))], p=0.2)
             ])
-            spoof_color_transform = None
             
-        transform_live = T.Compose([
+        # Một Pipeline duy nhất cho tập Train
+        transform_train = T.Compose([
             T.ToPILImage(),
-            T.RandomCrop(size=(input_size, input_size), pad_if_needed=True, padding_mode="reflect"),
+            # Thêm lại pad_if_needed=True để tránh lỗi nếu ảnh có chiều < 224 (VD: 160x240)
+            T.RandomCrop(size=(224, 224), pad_if_needed=True, padding_mode="reflect"),
             RandomRotationWithReflect(15),
             T.RandomHorizontalFlip(),
-            live_color_transform,
+            color_transform, # Áp dụng màu sắc/độ nét chung
             T.ToTensor(),
+            T.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])
         ])
         
-        spoof_transforms = [
-            T.ToPILImage(),
-            T.RandomCrop(size=(input_size, input_size), pad_if_needed=True, padding_mode="reflect"),
-            RandomRotationWithReflect(15),
-            T.RandomHorizontalFlip(),
-        ]
-        if spoof_color_transform is not None:
-            spoof_transforms.append(spoof_color_transform)
-        spoof_transforms.append(T.ToTensor())
-        
-        transform_spoof = T.Compose(spoof_transforms)
-        
-        transform = (transform_live, transform_spoof)
+        # Nếu class Dataset của bạn được thiết kế để nhận tuple (transform_live, transform_spoof)
+        # Ta gán transform_train cho cả hai để giữ nguyên cấu trúc code cũ mà không gây lỗi
+        transform = (transform_train, transform_train)  
     else:
         transform = T.Compose([
             T.ToPILImage(),
-            SquarePad(),
-            T.Resize((input_size, input_size)),
+            # Đảm bảo Val/Test cũng có Pad nếu ảnh nhỏ hơn 224 để CenterCrop không văng lỗi
+            # Tùy thuộc vào việc bạn viết custom SquarePad như trước hay dùng mặc định của PyTorch
+            T.CenterCrop(224), 
             T.ToTensor(),
+            T.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])
         ])
         
-    # Calculate fourier size: input_size=128 -> (16, 16)
-    k_size = (input_size + 15) // 16
+    # Calculate fourier size based on the final image size (224x224)
+    k_size = (224 + 15) // 16
     fourier_size = (k_size * 2, k_size * 2)
     
     dataset = AntiSpoofingDataset(
