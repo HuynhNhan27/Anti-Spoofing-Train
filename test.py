@@ -6,6 +6,7 @@ import torch
 import numpy as np
 from PIL import Image
 import torchvision.transforms as T
+import torchvision.transforms.functional as F
 from torch.utils.data import Dataset, DataLoader
 
 # Add project root to python path to resolve src.* imports
@@ -13,7 +14,6 @@ sys.path.append(os.path.abspath(os.path.dirname(__file__)))
 
 from src.train import load_config, get_model
 from src.evaluate import load_checkpoint
-from src.data.dataset import SquarePad
 
 def parse_args():
     parser = argparse.ArgumentParser(description="Test Anti-Spoofing Model on single image or folder")
@@ -42,8 +42,7 @@ class InferenceDataset(Dataset):
             img = np.zeros((224, 224, 3), dtype=np.uint8)
         
         img_rgb = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
-        pil_img = Image.fromarray(img_rgb)
-        tensor_img = self.transform(pil_img)
+        tensor_img = self.transform(img_rgb)
         
         # Determine ground truth from path parts
         gt_label = -1
@@ -67,10 +66,9 @@ def predict_single(model, image_path, config, transform, device, threshold):
     
     # Convert to RGB
     img_rgb = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
-    pil_img = Image.fromarray(img_rgb)
     
     # Apply standard preprocessing
-    tensor_img = transform(pil_img)  # (3, H, W)
+    tensor_img = transform(img_rgb)  # (3, H, W)
     tensor_img = tensor_img.unsqueeze(0)  # Add batch dimension: (1, 3, H, W)
     
     # Handle sequential models
@@ -106,6 +104,22 @@ def predict_single(model, image_path, config, transform, device, threshold):
         "confidence": confidence
     }
 
+class PadReflectIfNeeded:
+    def __init__(self, target_size=224):
+        self.target_size = target_size
+
+    def __call__(self, img):
+        w, h = img.size
+        if w < self.target_size or h < self.target_size:
+            pad_w = max(0, self.target_size - w)
+            pad_h = max(0, self.target_size - h)
+            pad_left = pad_w // 2
+            pad_top = pad_h // 2
+            pad_right = pad_w - pad_left
+            pad_bottom = pad_h - pad_top
+            img = F.pad(img, (pad_left, pad_top, pad_right, pad_bottom), padding_mode='reflect')
+        return img
+
 def main():
     args = parse_args()
     config = load_config(args.config)
@@ -119,11 +133,12 @@ def main():
     model.eval()
     
     # 2. Setup preprocessing transforms
-    input_size = config["data"]["input_size"]
     transform = T.Compose([
-        SquarePad(),
-        T.Resize((input_size, input_size)),
+        T.ToPILImage(),
+        PadReflectIfNeeded(224),
+        T.CenterCrop(224),
         T.ToTensor(),
+        T.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])
     ])
     
     # 3. Process Input
