@@ -104,9 +104,11 @@ def predict_single(model, image_path, config, transform, device, threshold):
         "confidence": confidence
     }
 
-class PadReflectIfNeeded:
-    def __init__(self, target_size=224):
+class PadIfNeeded:
+    def __init__(self, target_size=224, fill=0, padding_mode="constant"):
         self.target_size = target_size
+        self.fill = fill
+        self.padding_mode = padding_mode
 
     def __call__(self, img):
         w, h = img.size
@@ -117,7 +119,7 @@ class PadReflectIfNeeded:
             pad_top = pad_h // 2
             pad_right = pad_w - pad_left
             pad_bottom = pad_h - pad_top
-            img = F.pad(img, (pad_left, pad_top, pad_right, pad_bottom), padding_mode='reflect')
+            img = F.pad(img, (pad_left, pad_top, pad_right, pad_bottom), fill=self.fill, padding_mode=self.padding_mode)
         return img
 
 def main():
@@ -135,7 +137,7 @@ def main():
     # 2. Setup preprocessing transforms
     transform = T.Compose([
         T.ToPILImage(),
-        PadReflectIfNeeded(224),
+        PadIfNeeded(224),
         T.CenterCrop(224),
         T.ToTensor(),
         T.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])

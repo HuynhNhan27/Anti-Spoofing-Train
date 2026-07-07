@@ -50,6 +50,24 @@ class SquarePad:
         padding = (p_left, p_top, p_right, p_bottom)
         return F.pad(image, padding, 0, "constant")
 
+class PadIfNeeded:
+    def __init__(self, target_size=224, fill=0, padding_mode="constant"):
+        self.target_size = target_size
+        self.fill = fill
+        self.padding_mode = padding_mode
+
+    def __call__(self, img):
+        w, h = img.size
+        if w < self.target_size or h < self.target_size:
+            pad_w = max(0, self.target_size - w)
+            pad_h = max(0, self.target_size - h)
+            pad_left = pad_w // 2
+            pad_top = pad_h // 2
+            pad_right = pad_w - pad_left
+            pad_bottom = pad_h - pad_top
+            img = F.pad(img, (pad_left, pad_top, pad_right, pad_bottom), fill=self.fill, padding_mode=self.padding_mode)
+        return img
+
 class RandomRotationWithReflect:
     """
     Randomly rotate the image and fill background pixels using boundary reflection (BORDER_REFLECT_101).
@@ -240,6 +258,7 @@ def get_dataloader(data_dir, split, batch_size, input_size, use_fourier=False, i
             
         transform_live = T.Compose([
             T.ToPILImage(),
+            PadIfNeeded(224),
             T.RandomCrop(size=(224, 224)),
             RandomRotationWithReflect(15),
             T.RandomHorizontalFlip(),
@@ -250,6 +269,7 @@ def get_dataloader(data_dir, split, batch_size, input_size, use_fourier=False, i
         
         spoof_transforms = [
             T.ToPILImage(),
+            PadIfNeeded(224),
             T.RandomCrop(size=(224, 224)),
             RandomRotationWithReflect(15),
             T.RandomHorizontalFlip(),
@@ -265,6 +285,7 @@ def get_dataloader(data_dir, split, batch_size, input_size, use_fourier=False, i
     else:
         transform = T.Compose([
             T.ToPILImage(),
+            PadIfNeeded(224),
             T.CenterCrop(224),
             T.ToTensor(),
             T.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])
