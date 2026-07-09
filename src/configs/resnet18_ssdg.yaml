@@ -1,9 +1,9 @@
 # Data settings
 data:
-  data_dir: "./data/celeba-spoof-cropped-sampled/dataset"
-  target_dir: "./data/fas_video_data"
-  target_train_csv: "./data/fas_video_data/train.csv"
-  target_val_csv: "./data/fas_video_data/val.csv"
+  data_dir: "/kaggle/input/datasets/nhnhunhc/celeba-spoof-cropped-sampled"
+  target_dir: "/kaggle/input/datasets/nhnhunhc/fas-video-data/fas_video_data"
+  target_train_csv: "/kaggle/input/datasets/nhnhunhc/csv-data/train.csv"
+  target_val_csv: "/kaggle/input/datasets/nhnhunhc/csv-data/val.csv"
   input_size: 224              # Standard resolution for ResNet-18
   use_fourier: false           # ResNet-18 does not use Fourier maps
   use_randaugment: true        # Enable custom SafeRandAugment search space
