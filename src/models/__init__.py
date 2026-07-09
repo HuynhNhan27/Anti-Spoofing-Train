@@ -4,6 +4,7 @@ from .feathernet.FeatherNet import FeatherNetA, FeatherNetB
 from .aenet.AENet import AENet
 from .MN3.MN3 import mobilenetv3_large, mobilenetv3_small
 from .resnet_fourier import ResNet18Fourier
+from .ssdg import SSDGModel
 
 __all__ = [
     "MultiFTNet",
@@ -14,4 +15,5 @@ __all__ = [
     "mobilenetv3_large",
     "mobilenetv3_small",
     "ResNet18Fourier",
+    "SSDGModel",
 ]
