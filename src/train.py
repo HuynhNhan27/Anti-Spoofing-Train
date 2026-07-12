@@ -40,7 +40,34 @@ def get_model(config, device):
     num_classes = config["model"]["num_classes"]
     pretrained = config["model"].get("pretrained", False)
     
-    if model_name == "minifasv2":
+    is_ssdg = "beta" in config.get("train", {}) and "alpha" in config.get("train", {})
+    if is_ssdg:
+        from src.models.ssdg import SSDGModel
+        if model_name == "resnet18":
+            import torchvision.models as models
+            backbone = models.resnet18(pretrained=pretrained)
+            feat_dim = backbone.fc.in_features
+            backbone.fc = nn.Identity()
+        elif model_name in ["resnet34", "resnet50", "efficientnet_b0", "efficientnet_b1", "efficientnet_b2", "mobilenetv2", "mobilenet_v2"]:
+            import timm
+            timm_name = model_name
+            if model_name == "mobilenetv2":
+                timm_name = "mobilenetv2_100"
+            backbone = timm.create_model(timm_name, pretrained=pretrained, num_classes=0)
+            feat_dim = backbone.num_features
+        else:
+            raise ValueError(f"Unsupported backbone for SSDG: {model_name}")
+            
+        margin = config["train"].get("margin", 1.0)
+        dist_type = config["train"].get("dist_type", "mse")
+        model = SSDGModel(
+            backbone=backbone,
+            feat_dim=feat_dim,
+            feature_dim=512,
+            margin=margin,
+            dist_type=dist_type
+        )
+    elif model_name == "minifasv2":
         from src.models.minifasv2.model import MultiFTNet
         input_size = config["data"]["input_size"]
         k_size = (input_size + 15) // 16
